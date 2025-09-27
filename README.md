@@ -4,9 +4,26 @@ Next.js(Edge) + Vercel KV(Redis) + Neon(Postgres)를 사용한 개인용 GPTs AP
 
 ## 🚀 배포 상태
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/goninis-projects/gpts-api-server)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/gonini/gpts-api-server)
 
-**현재 배포된 URL**: https://gpts-api-server-ezvyvx1zv-goninis-projects.vercel.app
+### 🌍 환경별 배포
+
+- **프로덕션 (Production)**: `main` 브랜치 → 자동 배포
+- **개발 (Development)**: `develop` 브랜치 → 자동 배포
+
+**현재 배포된 URL**: 
+- 프로덕션: https://gpts-api-server-ezvyvx1zv-goninis-projects.vercel.app
+- 개발: 설정 필요 (Vercel에서 develop 브랜치 연결 후)
+
+## 🌿 브랜치 전략
+
+### Git Flow 전략
+- **`main`**: 프로덕션 환경 (안정적인 코드)
+- **`develop`**: 개발 환경 (새로운 기능 개발 및 테스트)
+
+### 배포 자동화
+- `main` 브랜치에 푸시 → 프로덕션 자동 배포
+- `develop` 브랜치에 푸시 → 개발 환경 자동 배포
 
 ## 🚀 기능
 
