@@ -85,7 +85,7 @@ export async function GET(request: NextRequest) {
 
     // Redis에서 대화 목록 조회 (간단한 구현)
     // 실제로는 Redis에서 대화 목록을 관리하는 로직이 필요합니다
-    const conversations = [];
+    const conversations: any[] = [];
 
     return NextResponse.json({
       success: true,
