@@ -1,8 +1,5 @@
 import { kv } from '@vercel/kv';
 
-// 환경 변수가 없을 때는 더미 KV 인스턴스 사용
-export { kv };
-
 // Redis 캐시 헬퍼 함수들
 export class CacheService {
   // 사용자 세션 캐시
@@ -51,6 +48,7 @@ export class CacheService {
   // 캐시 삭제
   static async clearUserCache(userId: string) {
     const patterns = [`user:${userId}:*`, `conversation:*:${userId}*`];
+    
     for (const pattern of patterns) {
       const keys = await kv.keys(pattern);
       if (keys.length > 0) {
@@ -58,4 +56,12 @@ export class CacheService {
       }
     }
   }
+
+  // Redis 연결 테스트
+  static async ping() {
+    return await kv.ping();
+  }
 }
+
+// Vercel KV 호환성을 위한 export
+export { kv };
