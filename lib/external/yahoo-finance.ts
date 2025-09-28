@@ -1,6 +1,12 @@
 import { PriceData, EarningsRow } from '@/lib/core/schema';
 import { CacheService } from '@/lib/kv';
 import { fetchRevenueData } from '@/lib/external/sec-edgar';
+import {
+  fetchFinnhubEarnings,
+  fetchFinnhubPrices,
+  shouldUseFinnhubEarnings,
+  shouldUseFinnhubPrices,
+} from '@/lib/external/finnhub';
 
 /**
  * Yahoo Finance에서 주가 데이터를 가져옵니다.
@@ -9,68 +15,79 @@ import { fetchRevenueData } from '@/lib/external/sec-edgar';
  * @param to 종료 날짜 (YYYY-MM-DD)
  * @returns 조정된 주가 데이터
  */
-export async function fetchAdjPrices(
+async function fetchYahooAdjPrices(
   ticker: string,
   from: string,
   to: string
 ): Promise<PriceData[]> {
   const cacheKey = `yahoo_prices:${ticker}:${from}:${to}`;
-  
-  // 캐시에서 먼저 확인
+
   const cached = await CacheService.get(cacheKey);
   if (cached) {
     return JSON.parse(cached);
   }
 
-  // Yahoo Finance API URL
   const fromTimestamp = Math.floor(new Date(from).getTime() / 1000);
   const toTimestamp = Math.floor(new Date(to).getTime() / 1000);
-  
+
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${fromTimestamp}&period2=${toTimestamp}&interval=1d&includePrePost=true&events=div%2Csplit`;
 
-  try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'application/json',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache'
-      }
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+      'Accept': 'application/json',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Cache-Control': 'no-cache'
     }
+  });
 
-    const data = await response.json();
-    
-    if (!data.chart || !data.chart.result || data.chart.result.length === 0) {
-      throw new Error('No chart data found');
-    }
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
 
-    const result = data.chart.result[0];
-    const timestamps = result.timestamp;
-    const adjClose = result.indicators.adjclose[0].adjclose;
+  const data = await response.json();
 
-    if (!timestamps || !adjClose) {
-      throw new Error('No price data found');
-    }
+  if (!data.chart || !data.chart.result || data.chart.result.length === 0) {
+    throw new Error('No chart data found');
+  }
 
-    const prices: PriceData[] = timestamps.map((timestamp: number, index: number) => ({
+  const result = data.chart.result[0];
+  const timestamps = result.timestamp;
+  const adjClose = result.indicators.adjclose[0].adjclose;
+
+  if (!timestamps || !adjClose) {
+    throw new Error('No price data found');
+  }
+
+  const prices: PriceData[] = timestamps
+    .map((timestamp: number, index: number) => ({
       date: new Date(timestamp * 1000).toISOString().split('T')[0],
       adjClose: adjClose[index]
-    })).filter((price: PriceData) => price.adjClose !== null && !isNaN(price.adjClose));
+    }))
+    .filter((price: PriceData) => price.adjClose !== null && !isNaN(price.adjClose));
 
-    console.log(`Yahoo Finance: Fetched ${prices.length} price records for ${ticker}`);
+  console.log(`Yahoo Finance: Fetched ${prices.length} price records for ${ticker}`);
 
-    // 캐시에 저장 (60분 TTL)
-    await CacheService.setex(cacheKey, 3600, JSON.stringify(prices));
-    
-    return prices;
-  } catch (error) {
-    console.error('Yahoo Finance API error:', error);
-    throw error;
+  await CacheService.setex(cacheKey, 3600, JSON.stringify(prices));
+
+  return prices;
+}
+
+export async function fetchAdjPrices(
+  ticker: string,
+  from: string,
+  to: string
+): Promise<PriceData[]> {
+  if (shouldUseFinnhubPrices()) {
+    try {
+      return await fetchFinnhubPrices(ticker, from, to);
+    } catch (error) {
+      console.warn('[Prices] Finnhub toggle enabled but failed, falling back to Yahoo', error);
+      return fetchYahooAdjPrices(ticker, from, to);
+    }
   }
+
+  return fetchYahooAdjPrices(ticker, from, to);
 }
 
 /**
@@ -84,36 +101,38 @@ export async function fetchSpy(from: string, to: string): Promise<PriceData[]> {
  * Yahoo Finance에서 실적 데이터를 가져옵니다.
  * 10년치 과거 데이터를 포함합니다.
  */
-export async function fetchEarnings(
+async function fetchYahooEarnings(
   ticker: string,
   from: string,
   to: string
 ): Promise<EarningsRow[]> {
   const cacheKey = `yahoo-earnings:${ticker}:${from}:${to}`;
-  
-  // 캐시에서 먼저 확인
+
   const cached = await CacheService.get(cacheKey);
   if (cached) {
     console.log(`Yahoo Finance: Cache hit for earnings ${ticker}`);
     return JSON.parse(cached);
   }
 
-  try {
-    console.log(`Fetching Yahoo Finance earnings data for ${ticker}`);
-    
-    // Yahoo Finance에서 실적 데이터 가져오기
-    const earningsData = await fetchYahooEarningsData(ticker, from, to);
-    
-    console.log(`Yahoo Finance: Fetched ${earningsData.length} earnings records for ${ticker}`);
+  console.log(`Fetching Yahoo Finance earnings data for ${ticker}`);
+  const earningsData = await fetchYahooEarningsData(ticker, from, to);
+  console.log(`Yahoo Finance: Fetched ${earningsData.length} earnings records for ${ticker}`);
+  await CacheService.setex(cacheKey, 259200, JSON.stringify(earningsData));
+  return earningsData;
+}
 
-    // 캐시에 저장 (72시간 TTL)
-    await CacheService.setex(cacheKey, 259200, JSON.stringify(earningsData));
-    
-    return earningsData;
-  } catch (error) {
-    console.error('Yahoo Finance earnings API error:', error);
-    throw error;
+export async function fetchEarnings(
+  ticker: string,
+  from: string,
+  to: string
+): Promise<EarningsRow[]> {
+  if (shouldUseFinnhubEarnings()) {
+    console.log(`[Finnhub] USE_FINNHUB_EARNINGS enabled for ${ticker}`);
+    return fetchFinnhubEarnings(ticker, from, to);
   }
+
+  console.log(`[Yahoo] USE_FINNHUB_EARNINGS disabled; falling back to legacy earnings for ${ticker}`);
+  return fetchYahooEarnings(ticker, from, to);
 }
 
 /**

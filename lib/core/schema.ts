@@ -42,6 +42,10 @@ export type Breakpoint = {
   revYoY?: number;
   eps?: number | null;
   revenue?: number | null;
+  flags?: {
+    eps_yoy_nm?: true;
+    rev_yoy_nm?: true;
+  };
 };
 
 export type CARResult = {
@@ -52,12 +56,17 @@ export type CARResult = {
 
 export type AnalysisSegment = {
   label: string;
+  day0?: string;
   earnings: {
     date: string;
     when: 'bmo' | 'amc' | 'dmh' | 'unknown';
     eps: number | null;
     eps_yoy: number | null;
     rev_yoy: number | null;
+    flags?: {
+      eps_yoy_nm?: true;
+      rev_yoy_nm?: true;
+    };
   };
   period: {
     start: string;
@@ -68,6 +77,11 @@ export type AnalysisSegment = {
     car: number;
     ret_sum: number;
     bench_sum: number;
+    window_days?: number;
+    flags?: {
+      partial?: true;
+      short_window?: true;
+    };
   };
   source_urls: string[];
 };
