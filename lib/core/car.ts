@@ -10,13 +10,51 @@ export function computeCAR(
   const startIdx = day0Idx + startOffset;
   const endIdx = day0Idx + endOffset;
   
-  // 윈도우 범위 검증
-  if (startIdx < 0 || endIdx >= prices.length || startIdx >= endIdx) {
+  console.log(`CAR calculation: Day0=${day0Idx}, window=[${startOffset},${endOffset}], startIdx=${startIdx}, endIdx=${endIdx}, dataLength=${prices.length}`);
+  
+  // 윈도우 범위 검증 - 더 유연한 검증
+  if (startIdx < 0) {
+    console.warn(`Start index ${startIdx} is negative, adjusting to 0`);
+    const adjustedStartIdx = 0;
+    const adjustedEndIdx = Math.min(endIdx, prices.length - 1);
+    
+    if (adjustedStartIdx >= adjustedEndIdx) {
+      throw new Error('ERR_WINDOW_PARTIAL');
+    }
+    
+    return computeCARWithAdjustedWindow(prices, bench, adjustedStartIdx, adjustedEndIdx);
+  }
+  
+  if (endIdx >= prices.length) {
+    console.warn(`End index ${endIdx} exceeds data length ${prices.length}, adjusting to ${prices.length - 1}`);
+    const adjustedStartIdx = startIdx;
+    const adjustedEndIdx = prices.length - 1;
+    
+    if (adjustedStartIdx >= adjustedEndIdx) {
+      throw new Error('ERR_WINDOW_PARTIAL');
+    }
+    
+    return computeCARWithAdjustedWindow(prices, bench, adjustedStartIdx, adjustedEndIdx);
+  }
+  
+  if (startIdx >= endIdx) {
     throw new Error('ERR_WINDOW_PARTIAL');
   }
   
+  return computeCARWithAdjustedWindow(prices, bench, startIdx, endIdx);
+}
+
+function computeCARWithAdjustedWindow(
+  prices: PriceData[],
+  bench: PriceData[],
+  startIdx: number,
+  endIdx: number
+): CARResult {
   let retSum = 0;
   let benchSum = 0;
+  let validDays = 0;
+  
+  console.log(`Computing CAR with adjusted window: startIdx=${startIdx}, endIdx=${endIdx}`);
   
   // 윈도우 내 각 거래일에 대해 계산
   for (let i = startIdx; i < endIdx; i++) {
@@ -29,7 +67,11 @@ export function computeCAR(
     // 벤치마크 수익률
     const benchRet = (bench[i + 1].adjClose / bench[i].adjClose) - 1;
     benchSum += benchRet;
+    
+    validDays++;
   }
+  
+  console.log(`CAR calculation completed: validDays=${validDays}, retSum=${retSum.toFixed(4)}, benchSum=${benchSum.toFixed(4)}`);
   
   // CAR = sum(ri - riBench)
   const car = retSum - benchSum;

@@ -47,6 +47,16 @@ const memoryCache = new MemoryCache();
 
 // Redis 캐시 헬퍼 함수들
 export class CacheService {
+  // 일반적인 get/set 메서드
+  static async get(key: string): Promise<string | null> {
+    return memoryCache.get(key);
+  }
+
+  static async setex(key: string, seconds: number, value: string): Promise<string | null> {
+    memoryCache.set(key, value, seconds);
+    return null;
+  }
+
   // 사용자 세션 캐시
   static async setUserSession(userId: string, sessionData: any, ttl: number = 3600) {
     const key = `user:${userId}:session`;

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AnalysisRequestSchema, AnalysisResponse } from '@/lib/core/schema';
-import { fetchAdjPrices, fetchSpy } from '@/lib/external/polygon';
-import { fetchEarnings } from '@/lib/external/finnhub';
+import { fetchAdjPrices, fetchSpy, fetchEarnings } from '@/lib/external/yahoo-finance'; // All from Yahoo Finance
 import { detectBreakpoints } from '@/lib/core/breakpoints';
 import { resolveDay0, getTradingDates, formatDateRange } from '@/lib/core/calendar';
 import { computeCAR, alignPriceData } from '@/lib/core/car';
@@ -37,15 +36,15 @@ export async function POST(request: NextRequest) {
     
     const [prices, bench, earnings] = await Promise.all([
       fetchAdjPrices(ticker, from, to).catch(err => {
-        console.error('Polygon API error:', err);
+        console.error('Yahoo Finance prices API error:', err);
         throw new Error('ERR_NO_PRICES');
       }),
       fetchSpy(from, to).catch(err => {
-        console.error('SPY API error:', err);
+        console.error('Yahoo Finance SPY API error:', err);
         throw new Error('ERR_NO_BENCH');
       }),
       fetchEarnings(ticker, from, to).catch(err => {
-        console.error('Finnhub API error:', err);
+        console.error('Yahoo Finance earnings API error:', err);
         throw new Error('ERR_NO_EARNINGS');
       }),
     ]);
@@ -82,7 +81,10 @@ export async function POST(request: NextRequest) {
     const tradingDates = getTradingDates(alignedPrices);
 
     // 3. 변곡점 탐지
+    console.log('Earnings data for breakpoint detection:', JSON.stringify(earnings, null, 2));
     const breakpoints = detectBreakpoints(earnings);
+    console.log('Detected breakpoints:', JSON.stringify(breakpoints, null, 2));
+    console.log(`Total breakpoints detected: ${breakpoints.length}`);
 
     if (breakpoints.length === 0) {
       return NextResponse.json({
@@ -103,12 +105,14 @@ export async function POST(request: NextRequest) {
     }
 
     // 4. 각 변곡점에 대해 CAR 계산
-    const segments = [];
+    const segments: AnalysisResponse['segments'] = [];
 
     for (const breakpoint of breakpoints) {
       try {
         // Day0 계산
+        console.log(`Processing breakpoint: ${breakpoint.announceDate}`);
         const day0Idx = resolveDay0(breakpoint.announceDate, breakpoint.when, tradingDates);
+        console.log(`Day0 index for ${breakpoint.announceDate}: ${day0Idx}`);
         
         if (day0Idx === null) {
           console.warn(`Day0 not found for ${breakpoint.announceDate}`);
@@ -123,7 +127,9 @@ export async function POST(request: NextRequest) {
 
         for (const { window, label } of windows) {
           try {
+            console.log(`Computing CAR for ${breakpoint.announceDate} window ${label} (Day0: ${day0Idx})`);
             const carResult = computeCAR(alignedPrices, alignedBench, day0Idx, window);
+            console.log(`CAR result for ${label}:`, carResult);
             
             const segment = {
               label: `${breakpoint.announceDate} ${breakpoint.eps !== null ? `EPS YoY ${(breakpoint.epsYoY! * 100).toFixed(0)}%` : ''} ${breakpoint.revenue !== null ? `Rev YoY ${(breakpoint.revYoY! * 100).toFixed(0)}%` : ''}`.trim(),
@@ -142,12 +148,13 @@ export async function POST(request: NextRequest) {
                 bench_sum: carResult.bench_sum,
               },
               source_urls: [
-                `polygon://v2/aggs/ticker/${ticker}/range/1/day/${from}/${to}`,
-                `finnhub://calendar/earnings?symbol=${ticker}&from=${from}&to=${to}`,
+                `yahoo-finance://chart/${ticker}?period1=${from}&period2=${to}`,
+                `yahoo-finance://earnings/${ticker}?from=${from}&to=${to}`,
               ],
             };
 
             segments.push(segment);
+            console.log(`Added segment for ${breakpoint.announceDate} window ${label}`);
           } catch (error) {
             console.warn(`CAR calculation failed for window ${label}:`, error);
           }
@@ -156,6 +163,9 @@ export async function POST(request: NextRequest) {
         console.warn(`Day0 resolution failed for ${breakpoint.announceDate}:`, error);
       }
     }
+
+    console.log(`Final segments count: ${segments.length}`);
+    console.log('Final segments:', JSON.stringify(segments, null, 2));
 
     const response: AnalysisResponse = {
       ticker,
