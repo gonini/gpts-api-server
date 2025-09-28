@@ -5,6 +5,7 @@ import { detectBreakpoints, getLastEpsNormalizationMeta } from '@/lib/core/break
 import { resolveDay0, getTradingDates, formatDateRange, getLastResolveDay0Meta } from '@/lib/core/calendar';
 import { computeCAR, alignPriceData } from '@/lib/core/car';
 import { RateLimiter } from '@/lib/core/rate-limit';
+import { buildSourceUrls } from '@/lib/core/source-urls';
 import { shouldUseFinnhubEarnings, shouldUseFinnhubPrices } from '@/lib/external/finnhub';
 
 export const runtime = 'edge';
@@ -15,20 +16,6 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   return handleRequest(request);
-}
-
-export function buildSourceUrls(
-  ticker: string,
-  benchTicker: string,
-  from: string,
-  to: string,
-  priceProviderLabel: string
-): string[] {
-  return [
-    `finnhub://calendar/earnings?symbol=${ticker}&from=${from}&to=${to}`,
-    `prices://${ticker}?provider=${priceProviderLabel}`,
-    `prices://${benchTicker}?provider=${priceProviderLabel}`,
-  ];
 }
 
 async function handleRequest(request: NextRequest) {

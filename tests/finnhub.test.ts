@@ -73,7 +73,7 @@ async function testFinnhubRetry() {
 }
 
 async function testSourceUrls() {
-  const { buildSourceUrls } = require('../app/api/analyze/route');
+  const { buildSourceUrls } = require('../lib/core/source-urls');
   const urls = buildSourceUrls('AAPL', 'SPY', '2023-01-01', '2023-12-31', 'finnhub');
   assert(urls.some((url: string) => url.startsWith('finnhub://')), 'Source URLs must include Finnhub prefix');
   assert(urls.includes('prices://AAPL?provider=finnhub'), 'Ticker price source should reflect provider');
