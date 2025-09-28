@@ -28,8 +28,30 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const body = await request.json();
-    const { ticker, from, to } = AnalysisRequestSchema.parse(body);
+    // GET 요청 (쿼리 파라미터) 또는 POST 요청 (JSON body) 지원
+    let ticker: string, from: string, to: string;
+    
+    if (request.method === 'GET') {
+      const url = new URL(request.url);
+      ticker = url.searchParams.get('ticker') || '';
+      from = url.searchParams.get('from') || '';
+      to = url.searchParams.get('to') || '';
+    } else {
+      const body = await request.json();
+      const parsed = AnalysisRequestSchema.parse(body);
+      ticker = parsed.ticker;
+      from = parsed.from;
+      to = parsed.to;
+    }
+    
+    // 입력 검증
+    if (!ticker || !from || !to) {
+      return NextResponse.json({
+        success: false,
+        error: 'ERR_INVALID_INPUT',
+        message: 'Missing required parameters: ticker, from, to',
+      }, { status: 400 });
+    }
 
     // 1. 데이터 수집
     console.log(`Fetching data for ${ticker} from ${from} to ${to}`);
