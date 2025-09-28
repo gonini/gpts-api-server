@@ -1,4 +1,4 @@
-import { PriceData } from '@/lib/core/schema';
+import { PriceData, EarningsRow } from '@/lib/core/schema';
 import { CacheService } from '@/lib/kv';
 import { fetchRevenueData } from '@/lib/external/sec-edgar';
 
@@ -88,7 +88,7 @@ export async function fetchEarnings(
   ticker: string,
   from: string,
   to: string
-): Promise<Array<{ date: string; when: string; eps: number | null; revenue: number | null }>> {
+): Promise<EarningsRow[]> {
   const cacheKey = `yahoo-earnings:${ticker}:${from}:${to}`;
   
   // 캐시에서 먼저 확인
@@ -124,7 +124,7 @@ async function fetchYahooEarningsData(
   ticker: string,
   from: string,
   to: string
-): Promise<Array<{ date: string; when: string; eps: number | null; revenue: number | null }>> {
+): Promise<EarningsRow[]> {
   console.log(`Fetching Alpha Vantage earnings data for ${ticker} from ${from} to ${to}`);
   
   try {
@@ -142,7 +142,7 @@ async function fetchYahooEarningsData(
       `https://www.alphavantage.co/query?function=INCOME_STATEMENT&symbol=${ticker}&apikey=${alphaVantageApiKey}`
     ];
     
-    let earningsData: Array<{ date: string; when: string; eps: number | null; revenue: number | null }> = [];
+    let earningsData: EarningsRow[] = [];
     
     for (const alphaVantageUrl of alphaVantageEndpoints) {
       try {
@@ -171,7 +171,7 @@ async function fetchYahooEarningsData(
         }
         
       } catch (error) {
-        console.log(`Endpoint failed: ${error.message}`);
+        console.log(`Endpoint failed: ${error instanceof Error ? error.message : String(error)}`);
         continue;
       }
     }
@@ -193,14 +193,14 @@ async function fetchYahooEarningsData(
           // 새로운 earnings 레코드 생성 (EPS는 null, Revenue만 있음)
           earningsData.push({
             date: revenueRecord.date,
-            when: 'unknown',
+                   when: 'unknown' as const,
             eps: null,
             revenue: revenueRecord.revenue,
           });
         }
       });
     } catch (error) {
-      console.log(`SEC EDGAR data fetch failed: ${error.message}`);
+      console.log(`SEC EDGAR data fetch failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     
     // 중복 제거 및 정렬
@@ -212,7 +212,7 @@ async function fetchYahooEarningsData(
     return uniqueEarnings;
     
   } catch (error) {
-    console.error(`Error fetching Finnhub earnings for ${ticker}:`, error);
+    console.error(`Error fetching Alpha Vantage earnings for ${ticker}:`, error instanceof Error ? error.message : String(error));
     return [];
   }
 }
@@ -225,8 +225,8 @@ function parseAlphaVantageData(
   ticker: string,
   from: string,
   to: string
-): Array<{ date: string; when: string; eps: number | null; revenue: number | null }> {
-  const earningsData: Array<{ date: string; when: string; eps: number | null; revenue: number | null }> = [];
+): EarningsRow[] {
+  const earningsData: EarningsRow[] = [];
   
   try {
     console.log(`Parsing Alpha Vantage data for ${ticker}`);
@@ -262,7 +262,7 @@ function parseAlphaVantageData(
         if (earningDate >= fromDate && earningDate <= toDate) {
           earningsData.push({
             date: date || new Date().toISOString().split('T')[0],
-            when: 'unknown',
+                   when: 'unknown' as const,
             eps: eps,
             revenue: revenue,
           });
@@ -296,7 +296,7 @@ function parseAlphaVantageData(
         if (earningDate >= fromDate && earningDate <= toDate) {
           earningsData.push({
             date: date || new Date().toISOString().split('T')[0],
-            when: 'unknown',
+                   when: 'unknown' as const,
             eps: eps,
             revenue: revenue,
           });
@@ -331,7 +331,7 @@ function parseAlphaVantageData(
           if (earningDate >= fromDate && earningDate <= toDate) {
             earningsData.push({
               date: date || new Date().toISOString().split('T')[0],
-              when: 'unknown',
+                   when: 'unknown' as const,
               eps: eps,
               revenue: revenue,
             });
@@ -344,7 +344,7 @@ function parseAlphaVantageData(
     return earningsData;
     
   } catch (error) {
-    console.error(`Error parsing Alpha Vantage data for ${ticker}:`, error);
+    console.error(`Error parsing Alpha Vantage data for ${ticker}:`, error instanceof Error ? error.message : String(error));
     return [];
   }
 }
@@ -396,7 +396,7 @@ function parseFinnhubEarningsData(
         if (earningDate >= fromDate && earningDate <= toDate) {
           earningsData.push({
             date: date || new Date().toISOString().split('T')[0],
-            when: 'unknown',
+                   when: 'unknown' as const,
             eps: eps,
             revenue: revenue,
           });
@@ -460,7 +460,7 @@ function parseFinnhubEarningsData(
           if (earningDate >= fromDate && earningDate <= toDate) {
             earningsData.push({
               date: newsDate,
-              when: 'unknown',
+                   when: 'unknown' as const,
               eps: null, // 뉴스에서는 EPS 정보를 직접 추출하기 어려움
               revenue: null,
             });
