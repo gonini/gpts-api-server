@@ -42,6 +42,10 @@ export type Breakpoint = {
   revYoY?: number;
   eps?: number | null;
   revenue?: number | null;
+  flags?: {
+    eps_yoy_nm?: true;
+    rev_yoy_nm?: true;
+  };
 };
 
 export type CARResult = {
@@ -58,6 +62,10 @@ export type AnalysisSegment = {
     eps: number | null;
     eps_yoy: number | null;
     rev_yoy: number | null;
+    flags?: {
+      eps_yoy_nm?: true;
+      rev_yoy_nm?: true;
+    };
   };
   period: {
     start: string;
