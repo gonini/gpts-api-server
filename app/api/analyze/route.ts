@@ -8,7 +8,15 @@ import { RateLimiter } from '@/lib/core/rate-limit';
 
 export const runtime = 'edge';
 
+export async function GET(request: NextRequest) {
+  return handleRequest(request);
+}
+
 export async function POST(request: NextRequest) {
+  return handleRequest(request);
+}
+
+async function handleRequest(request: NextRequest) {
   try {
     // 레이트 리미팅 체크
     const ip = request.ip || request.headers.get('x-forwarded-for') || 'unknown';
