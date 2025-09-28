@@ -33,10 +33,21 @@ export async function POST(request: NextRequest) {
     const { ticker, from, to } = AnalysisRequestSchema.parse(body);
 
     // 1. 데이터 수집
+    console.log(`Fetching data for ${ticker} from ${from} to ${to}`);
+    
     const [prices, bench, earnings] = await Promise.all([
-      fetchAdjPrices(ticker, from, to),
-      fetchSpy(from, to),
-      fetchEarnings(ticker, from, to),
+      fetchAdjPrices(ticker, from, to).catch(err => {
+        console.error('Polygon API error:', err);
+        throw new Error('ERR_NO_PRICES');
+      }),
+      fetchSpy(from, to).catch(err => {
+        console.error('SPY API error:', err);
+        throw new Error('ERR_NO_BENCH');
+      }),
+      fetchEarnings(ticker, from, to).catch(err => {
+        console.error('Finnhub API error:', err);
+        throw new Error('ERR_NO_EARNINGS');
+      }),
     ]);
 
     if (prices.length === 0) {
@@ -48,11 +59,22 @@ export async function POST(request: NextRequest) {
     }
 
     if (earnings.length === 0) {
+      console.log('No earnings data found, returning empty segments');
       return NextResponse.json({
-        success: false,
-        error: 'ERR_NO_EARNINGS',
-        message: 'No earnings data available for the specified period',
-      }, { status: 404 });
+        success: true,
+        data: {
+          ticker,
+          as_of: new Date().toISOString().split('T')[0],
+          segments: [],
+          notes: [
+            'No earnings data available for the specified period',
+            'price_TTL=60m',
+            'fund_TTL=72h',
+            'assume_AMC_if_unknown',
+            'timestamps=ET; adjustedClose=true',
+          ],
+        },
+      });
     }
 
     // 2. 데이터 정렬 및 정렬

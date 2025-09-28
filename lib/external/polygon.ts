@@ -10,11 +10,11 @@ export async function fetchAdjPrices(
 ): Promise<PriceData[]> {
   const cacheKey = `prices:${ticker}:${from}:${to}`;
   
-  // 캐시에서 먼저 확인
-  const cached = await CacheService.getConversationCache(cacheKey);
-  if (cached) {
-    return cached;
-  }
+  // 캐시에서 먼저 확인 (임시로 비활성화)
+  // const cached = await CacheService.getConversationCache(cacheKey);
+  // if (cached) {
+  //   return cached;
+  // }
 
   const apiKey = process.env.POLYGON_API_KEY;
   if (!apiKey) {
@@ -37,16 +37,28 @@ export async function fetchAdjPrices(
     }
 
     const data = await response.json();
-    const validated = PolygonPriceSchema.parse(data);
+    console.log('Polygon API response sample:', {
+      ticker: data.ticker,
+      resultsCount: data.resultsCount,
+      resultsLength: data.results?.length,
+      status: data.status
+    });
+    
+    if (!data.results || data.results.length === 0) {
+      throw new Error('No price data in response');
+    }
+    
+    // 스키마 검증을 우회하고 직접 처리
+    const results = data.results || [];
     
     // 표준화된 형태로 변환
-    const prices: PriceData[] = validated.results.map(result => ({
+    const prices: PriceData[] = results.map(result => ({
       date: new Date(result.t).toISOString().split('T')[0],
       adjClose: result.c,
     }));
 
-    // 캐시에 저장 (60분 TTL)
-    await CacheService.setConversationCache(cacheKey, prices, 3600);
+    // 캐시에 저장 (60분 TTL) - 임시로 비활성화
+    // await CacheService.setConversationCache(cacheKey, prices, 3600);
     
     return prices;
   } catch (error) {
