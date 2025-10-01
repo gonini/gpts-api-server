@@ -602,7 +602,7 @@ async function parseFactsWithCompanyFacts(raw: RawRecentFiling, _baseUrl: string
       if (!node?.units) continue;
       const candidates = collectUSDUnitFacts(node.units);
       if (!candidates.length) continue;
-      const best = chooseBestFact(candidates, raw.form, por, filingISO);
+      const best = chooseBestFact(candidates, raw.form, por, filingISO || undefined);
       if (best) return { val: best.val, fy: best.fy, fp: best.fp, end: best.end };
     }
     return null;
