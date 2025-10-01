@@ -7,7 +7,6 @@
 // - Exhibits 노이즈 필터링(R*.htm, css/js/img 등 제외), EPS 단위 'USD/share' 통일, 8-K Item 5.07 매핑 추가
 
 import { CacheService } from '@/lib/kv';
-import * as crypto from 'crypto';
 
 // ---------- Const & Utils ----------
 const SEC_BASE = 'https://data.sec.gov';
@@ -76,8 +75,12 @@ function unique<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
 
-function sha256Hex(s: string): string {
-  return crypto.createHash('sha256').update(s).digest('hex');
+async function sha256Hex(s: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(s);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ---------- CIK Lookup (with cache) ----------
@@ -354,7 +357,7 @@ async function parseSECDocument(
   try {
     const idxRes = await secFetch(`${baseUrl}/index.json`);
     const idxText = await idxRes.text();
-    source_hash = `sha256:${sha256Hex(idxText).slice(0, 16)}`;
+    source_hash = `sha256:${(await sha256Hex(idxText)).slice(0, 16)}`;
   } catch {
     source_hash = null;
   }
@@ -659,7 +662,7 @@ function tryParseUsDate(s: string): string | null {
     const year = parseInt(m3[3], 10);
     return toISODate(new Date(Date.UTC(year, month, day)));
   }
-  return null;
+    return null;
 }
 
 function clampEventDateToFilingRange(candidateISO: string, filingISO: string, days = 21): string | null {
