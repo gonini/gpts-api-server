@@ -140,7 +140,7 @@ export async function fetchFinnhubEarnings(ticker: string, from: string, to: str
 
     return parsed.data.earningsCalendar.map(entry => ({
       date: normalizeFinnhubDate(entry.date),
-      when: entry.time === 'bmo' || entry.time === 'amc' || entry.time === 'dmh' ? entry.time : 'unknown',
+      when: (entry.time || entry.hour) === 'bmo' || (entry.time || entry.hour) === 'amc' || (entry.time || entry.hour) === 'dmh' ? (entry.time || entry.hour) : 'unknown',
       eps: typeof entry.epsActual === 'number' ? entry.epsActual : null,
       revenue: typeof entry.revenueActual === 'number' ? entry.revenueActual : null,
     }));

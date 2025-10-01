@@ -3,19 +3,47 @@
 
 import { CacheService } from '@/lib/kv';
 
-// 티커별 CIK 매핑 (Central Index Key)
-const TICKER_TO_CIK: Record<string, string> = {
-  'AAPL': '0000320193',
-  'MSFT': '0000789019',
-  'GOOGL': '0001652044',
-  'AMZN': '0001018724',
-  'TSLA': '0001318605',
-  'META': '0001326801',
-  'NBR': '0001163739',
-  'NVDA': '0001045810',
-  'NFLX': '0001067983',
-  'AMD': '0000002488',
-};
+/**
+ * SEC EDGAR Company Tickers API를 통해 티커의 CIK를 동적으로 조회합니다.
+ * @param ticker 주식 티커 심볼
+ * @returns CIK 문자열 또는 null
+ */
+async function getCIKFromTicker(ticker: string): Promise<string | null> {
+  try {
+    // SEC EDGAR Company Tickers API 호출
+    const url = `https://www.sec.gov/files/company_tickers.json`;
+    
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    
+    // 티커로 CIK 찾기
+    for (const [key, company] of Object.entries(data)) {
+      const companyData = company as { ticker: string; cik_str: string; title: string };
+      if (companyData.ticker === ticker.toUpperCase()) {
+        const cik = String(companyData.cik_str).padStart(10, '0');
+        console.log(`Found CIK for ${ticker}: ${cik}`);
+        return cik;
+      }
+    }
+
+    console.log(`CIK not found for ticker: ${ticker}`);
+    return null;
+    
+  } catch (error) {
+    console.error(`Error fetching CIK for ${ticker}:`, error);
+    return null;
+  }
+}
 
 /**
  * SEC EDGAR에서 특정 티커의 Revenue 데이터를 가져옵니다.
@@ -58,7 +86,8 @@ async function parseRealSECData(ticker: string, from: string, to: string): Promi
   const revenueData: Array<{ date: string; revenue: number }> = [];
   
   try {
-    const cik = TICKER_TO_CIK[ticker.toUpperCase()];
+    // 동적으로 CIK 조회
+    const cik = await getCIKFromTicker(ticker);
     if (!cik) {
       console.log(`CIK not found for ${ticker}, skipping real SEC data`);
       return [];
@@ -112,13 +141,14 @@ async function parseRealSECData(ticker: string, from: string, to: string): Promi
  * SEC EDGAR에서 특정 보고서 데이터를 가져옵니다.
  */
 async function fetchSECData(ticker: string, reportType: string, year: number): Promise<string> {
-  const cik = TICKER_TO_CIK[ticker.toUpperCase()];
+  const cik = await getCIKFromTicker(ticker);
   if (!cik) {
     throw new Error(`CIK not found for ${ticker}`);
   }
 
-  // SEC EDGAR API URL 구성
-  const url = `https://www.sec.gov/Archives/edgar/data/${cik}/${year}/${reportType.toLowerCase()}.txt`;
+    // SEC EDGAR API URL 구성 - 실제로는 더 복잡한 URL 구조를 가짐
+    // 실제 구현에서는 SEC EDGAR API의 실제 엔드포인트를 사용해야 함
+    const url = `https://www.sec.gov/Archives/edgar/data/${cik}/${year}/${reportType.toLowerCase()}.txt`;
   
   try {
     const response = await fetch(url, {

@@ -18,6 +18,7 @@ export const FinnhubEarningsSchema = z.object({
     epsActual: z.number().nullable(),
     revenueActual: z.number().nullable(),
     time: z.string().optional(),
+    hour: z.string().optional(),
   })),
 });
 
