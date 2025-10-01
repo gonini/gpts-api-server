@@ -82,19 +82,28 @@ function cleanSnippet(text: string): string {
   // 연속 공백 정리
   cleaned = cleaned.replace(/\s+/g, ' ').trim();
   
-  // TOC/목차 패턴 제거
+  // TOC/목차/테이블 패턴 제거 (더 강력한 패턴)
   const tocPatterns = [
     /table\s+of\s+contents/i,
     /contents\s*$/i,
     /index\s*$/i,
     /^\s*<td[^>]*>.*<\/td>\s*$/i, // 단일 td 셀
     /^\s*<tr[^>]*>.*<\/tr>\s*$/i, // 단일 tr 행
+    /^\s*\d+\s*$/i, // 숫자만 있는 줄
+    /^\s*[A-Z][a-z]+\s+\d+\s*$/i, // "Risk Factors 45" 같은 패턴
+    /^\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s+\d+\s*$/i, // "Item 1A Risk Factors 45" 같은 패턴
+    /^\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+\d+\s*$/i, // 더 복잡한 패턴
   ];
   
   for (const pattern of tocPatterns) {
     if (pattern.test(cleaned)) {
       return '';
     }
+  }
+  
+  // TOC/테이블 힌트가 강한 블록 스킵
+  if (looksLikeTOC(cleaned)) {
+    return '';
   }
   
   // 문장 단위로 정리 (마침표 기준 1-2문장)
@@ -104,10 +113,28 @@ function cleanSnippet(text: string): string {
   return result || cleaned.slice(0, 200) + '...';
 }
 
+function looksLikeTOC(text: string): boolean {
+  const tocHints = [
+    /^\s*\d+\s*$/i, // 숫자만
+    /^\s*[A-Z][a-z]+\s+\d+\s*$/i, // "Risk Factors 45"
+    /^\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s+\d+\s*$/i, // "Item 1A Risk Factors 45"
+    /^\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+\d+\s*$/i, // 더 복잡한 패턴
+    /^\s*[A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+\d+\s*$/i, // 매우 복잡한 패턴
+  ];
+  
+  return tocHints.some(pattern => pattern.test(text));
+}
+
 function extractPressReleaseRevenue(text: string): number | null {
-  // Revenue/Net sales 패턴 매칭
+  // Revenue/Net sales 패턴 매칭 (더 정확한 패턴)
   const patterns = [
+    // "revenue of $XX.X billion" 패턴
+    /(?:revenue|net\s+sales|total\s+revenue)\s+of\s+\$?([0-9,]+\.?[0-9]*)\s*(?:billion|million|b|m)/i,
+    // "revenue: $XX.X billion" 패턴
     /(?:revenue|net\s+sales|total\s+revenue)[:\s]*\$?([0-9,]+\.?[0-9]*)\s*(?:billion|million|b|m)/i,
+    // "revenue $XX.X billion" 패턴
+    /(?:revenue|net\s+sales|total\s+revenue)\s+\$?([0-9,]+\.?[0-9]*)\s*(?:billion|million|b|m)/i,
+    // "revenue: $XX.X" 패턴 (단위 없음)
     /(?:revenue|net\s+sales|total\s+revenue)[:\s]*\$([0-9,]+\.?[0-9]*)/i,
   ];
   
@@ -115,14 +142,16 @@ function extractPressReleaseRevenue(text: string): number | null {
     const match = text.match(pattern);
     if (match) {
       const value = parseFloat(match[1].replace(/,/g, ''));
-      if (!isNaN(value)) {
+      if (!isNaN(value) && value > 0) {
         // billion/million 단위 정규화
-        if (text.toLowerCase().includes('billion') || text.toLowerCase().includes('b')) {
+        const lowerText = text.toLowerCase();
+        if (lowerText.includes('billion') || lowerText.includes('b')) {
           return value * 1000000000;
-        } else if (text.toLowerCase().includes('million') || text.toLowerCase().includes('m')) {
+        } else if (lowerText.includes('million') || lowerText.includes('m')) {
           return value * 1000000;
         }
-        return value;
+        // 단위가 없으면 billion으로 가정 (대형주 기준)
+        return value * 1000000000;
       }
     }
   }
@@ -685,12 +714,26 @@ async function parseFactsWithCompanyFacts(raw: RawRecentFiling, _baseUrl: string
       const res = await secFetch(pressRelease.href, { headers: { Accept: 'text/html,text/plain,*/*' } });
       const text = await res.text();
       const prRevenue = extractPressReleaseRevenue(text);
-      if (prRevenue && Math.abs(prRevenue - rev.val) / rev.val > 0.1) { // 10% 이상 차이
-        out.facts_alt = { press_release_revenue: { value: prRevenue, unit: 'USD', source: 'press_release' } };
+      if (prRevenue) {
+        const diff = Math.abs(prRevenue - rev.val) / rev.val;
+        console.log(`[DEBUG] Press Release Revenue: ${prRevenue}, Company Facts: ${rev.val}, Diff: ${(diff * 100).toFixed(1)}%`);
+        
+        // 10% 이상 차이 시 facts_alt에 저장
+        if (diff > 0.1) {
+          out.facts_alt = { 
+            press_release_revenue: { 
+              value: prRevenue, 
+              unit: 'USD', 
+              source: 'press_release',
+              difference_percent: Math.round(diff * 100)
+            } 
+          };
+        }
       }
     }
   } catch (e) {
     // Press release 검증 실패는 무시
+    console.log(`[DEBUG] Press release revenue extraction failed: ${e instanceof Error ? e.message : String(e)}`);
   }
   
   return out;
