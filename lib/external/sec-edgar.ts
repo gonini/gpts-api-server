@@ -75,6 +75,60 @@ function unique<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
 
+function cleanSnippet(text: string): string {
+  // HTML 태그 제거 (더 강력한 정규식)
+  let cleaned = text.replace(/<[^>]*>/g, ' ');
+  
+  // 연속 공백 정리
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  // TOC/목차 패턴 제거
+  const tocPatterns = [
+    /table\s+of\s+contents/i,
+    /contents\s*$/i,
+    /index\s*$/i,
+    /^\s*<td[^>]*>.*<\/td>\s*$/i, // 단일 td 셀
+    /^\s*<tr[^>]*>.*<\/tr>\s*$/i, // 단일 tr 행
+  ];
+  
+  for (const pattern of tocPatterns) {
+    if (pattern.test(cleaned)) {
+      return '';
+    }
+  }
+  
+  // 문장 단위로 정리 (마침표 기준 1-2문장)
+  const sentences = cleaned.split(/[.!?]+/).filter(s => s.trim().length > 10);
+  const result = sentences.slice(0, 2).join('. ').trim();
+  
+  return result || cleaned.slice(0, 200) + '...';
+}
+
+function extractPressReleaseRevenue(text: string): number | null {
+  // Revenue/Net sales 패턴 매칭
+  const patterns = [
+    /(?:revenue|net\s+sales|total\s+revenue)[:\s]*\$?([0-9,]+\.?[0-9]*)\s*(?:billion|million|b|m)/i,
+    /(?:revenue|net\s+sales|total\s+revenue)[:\s]*\$([0-9,]+\.?[0-9]*)/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const value = parseFloat(match[1].replace(/,/g, ''));
+      if (!isNaN(value)) {
+        // billion/million 단위 정규화
+        if (text.toLowerCase().includes('billion') || text.toLowerCase().includes('b')) {
+          return value * 1000000000;
+        } else if (text.toLowerCase().includes('million') || text.toLowerCase().includes('m')) {
+          return value * 1000000;
+        }
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
 async function sha256Hex(s: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(s);
@@ -346,7 +400,7 @@ async function parseSECDocument(
 
   const event_types = unique(items.flatMap((it) => itemToEventType[it] || []));
 
-  const facts = await parseFactsWithCompanyFacts(raw, baseUrl, ticker);
+  const facts = await parseFactsWithCompanyFacts(raw, baseUrl, ticker, exhibits);
   const snippets = await extractSnippets(raw, baseUrl, ticker);
 
   const event_date = await determineEventDate(raw, exhibits);
@@ -398,8 +452,12 @@ async function parseSections(raw: RawRecentFiling, baseUrl: string): Promise<any
     for (const re of patterns) {
       const m = re.exec(text);
       if (m && !sections[label]) {
-        sections[label] = { start: m[0].slice(0, 80), snippet: text.substring(m.index, m.index + 360) + '...' };
-        return;
+        const rawSnippet = text.substring(m.index, m.index + 360);
+        const cleanedSnippet = cleanSnippet(rawSnippet);
+        if (cleanedSnippet) {
+          sections[label] = { start: m[0].slice(0, 80), snippet: cleanedSnippet };
+          return;
+        }
       }
     }
   };
@@ -478,14 +536,15 @@ async function parseExhibits(raw: RawRecentFiling, baseUrl: string): Promise<any
 
       // 2) 데이터/스키마/XLSX/PDF
       if (/\.(xlsx|xls)$/i.test(lower)) { out.push({ type: 'xlsx', href, title: name }); continue; }
-      if (/\.(xml|json|zip|xsd)$/i.test(lower) && !/htm|html/i.test(lower)) { out.push({ type: 'data', href, title: name }); continue; }
+      if (/\.(xml|json|zip|xsd)$/i.test(lower) || /_htm\.xml$/i.test(lower)) { out.push({ type: 'data', href, title: name }); continue; }
       if (/\.(pdf)$/i.test(lower)) { out.push({ type: 'pdf', href, title: name }); continue; }
 
-      // 3) 명백한 노이즈(R*.htm, index-headers, index.html, css/js/img)
+      // 3) 명백한 노이즈(R*.htm, index-headers, *-index.html, css/js/img)
       if (
         /^r\d+\.htm$/i.test(name) ||
         /index-headers\.html$/i.test(lower) ||
         /(^|\/)index\.html$/i.test(lower) ||
+        /-index\.html$/i.test(lower) ||
         /\.(css|js|jpg|jpeg|png|gif|svg)$/i.test(lower)
       ) continue;
 
@@ -585,7 +644,7 @@ function chooseBestFact(arr: any[], formHint: string, reportDtISO: string | null
     })[0];
 }
 
-async function parseFactsWithCompanyFacts(raw: RawRecentFiling, _baseUrl: string, ticker?: string): Promise<any> {
+async function parseFactsWithCompanyFacts(raw: RawRecentFiling, _baseUrl: string, ticker?: string, exhibits?: any[]): Promise<any> {
   if (!(raw.form.startsWith('10-K') || raw.form.startsWith('10-Q'))) return {};
   const t = raw.tickers?.[0] || ticker;
   const cik = t ? await getCIKFromTicker(t) : null;
@@ -618,6 +677,22 @@ async function parseFactsWithCompanyFacts(raw: RawRecentFiling, _baseUrl: string
   if (op)  out.operating_income = { value: op.val,  unit: 'USD',       period: periodToLabel(op.fy, op.fp, op.end) };
   if (ni)  out.net_income = { value: ni.val, unit: 'USD',       period: periodToLabel(ni.fy, ni.fp, ni.end) };
   if (eps) out.eps_basic = { value: eps.val, unit: 'USD/share', period: periodToLabel(eps.fy, eps.fp, eps.end) };
+  
+  // Press release 수치 검증 (선택사항)
+  try {
+    const pressRelease = exhibits?.find((e: any) => e.type === 'press_release' && /\.(htm|html|txt)$/i.test(e.href));
+    if (pressRelease && rev) {
+      const res = await secFetch(pressRelease.href, { headers: { Accept: 'text/html,text/plain,*/*' } });
+      const text = await res.text();
+      const prRevenue = extractPressReleaseRevenue(text);
+      if (prRevenue && Math.abs(prRevenue - rev.val) / rev.val > 0.1) { // 10% 이상 차이
+        out.facts_alt = { press_release_revenue: { value: prRevenue, unit: 'USD', source: 'press_release' } };
+      }
+    }
+  } catch (e) {
+    // Press release 검증 실패는 무시
+  }
+  
   return out;
 }
 
