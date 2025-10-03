@@ -169,9 +169,9 @@ export function detectBreakpoints(rows: EarningsRow[]): Breakpoint[] {
       );
     }
 
-    // 변곡 조건 확인 (현실적인 임계값)
-    const isEpsBreakpoint = epsYoY !== undefined && Math.abs(epsYoY) >= 0.2;
-    const isRevBreakpoint = revYoY !== undefined && Math.abs(revYoY) >= 0.15;
+    // 변곡 조건 확인 (더 낮은 임계값으로 더 많은 breakpoint 감지)
+    const isEpsBreakpoint = epsYoY !== undefined && Math.abs(epsYoY) >= 0.1; // 10%로 낮춤
+    const isRevBreakpoint = revYoY !== undefined && Math.abs(revYoY) >= 0.08; // 8%로 낮춤
 
     console.log(`Breakpoint check: EPS=${isEpsBreakpoint} (${epsYoY}), Revenue=${isRevBreakpoint} (${revYoY})`);
 

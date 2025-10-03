@@ -127,8 +127,13 @@ export async function fetchEarnings(
   to: string
 ): Promise<EarningsRow[]> {
   if (shouldUseFinnhubEarnings()) {
-    console.log(`[Finnhub] USE_FINNHUB_EARNINGS enabled for ${ticker}`);
-    return fetchFinnhubEarnings(ticker, from, to);
+    try {
+      console.log(`[Finnhub] USE_FINNHUB_EARNINGS enabled for ${ticker}`);
+      return await fetchFinnhubEarnings(ticker, from, to);
+    } catch (error) {
+      console.warn(`[Finnhub] Failed for ${ticker}, falling back to Yahoo Finance:`, error);
+      return fetchYahooEarnings(ticker, from, to);
+    }
   }
 
   console.log(`[Yahoo] USE_FINNHUB_EARNINGS disabled; falling back to legacy earnings for ${ticker}`);
@@ -273,12 +278,16 @@ function parseAlphaVantageData(
         // Revenue 데이터는 이 API에서 제공하지 않음
         let revenue = null;
         
-        // 날짜 범위 필터링
+        // 날짜 범위 필터링 (더 유연한 범위 적용)
         const earningDate = new Date(date);
         const fromDate = new Date(from);
         const toDate = new Date(to);
         
-        if (earningDate >= fromDate && earningDate <= toDate) {
+        // 요청 범위보다 2년 전부터 2년 후까지 포함하여 더 많은 데이터 수집
+        const extendedFromDate = new Date(fromDate.getFullYear() - 2, fromDate.getMonth(), fromDate.getDate());
+        const extendedToDate = new Date(toDate.getFullYear() + 2, toDate.getMonth(), toDate.getDate());
+        
+        if (earningDate >= extendedFromDate && earningDate <= extendedToDate) {
           earningsData.push({
             date: date || new Date().toISOString().split('T')[0],
                    when: 'unknown' as const,
@@ -312,7 +321,11 @@ function parseAlphaVantageData(
         const fromDate = new Date(from);
         const toDate = new Date(to);
         
-        if (earningDate >= fromDate && earningDate <= toDate) {
+        // 요청 범위보다 2년 전부터 2년 후까지 포함하여 더 많은 데이터 수집
+        const extendedFromDate = new Date(fromDate.getFullYear() - 2, fromDate.getMonth(), fromDate.getDate());
+        const extendedToDate = new Date(toDate.getFullYear() + 2, toDate.getMonth(), toDate.getDate());
+        
+        if (earningDate >= extendedFromDate && earningDate <= extendedToDate) {
           earningsData.push({
             date: date || new Date().toISOString().split('T')[0],
                    when: 'unknown' as const,
