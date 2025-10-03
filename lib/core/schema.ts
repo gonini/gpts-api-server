@@ -36,6 +36,22 @@ export type EarningsRow = {
   fiscalQ?: string;
 };
 
+export type EarningsCalendarRow = {
+  date: string;                    // event date (ISO yyyy-mm-dd)
+  epsActual: number | null;
+  epsEstimate: number | null;
+  hour: 'amc' | 'bmo' | 'dmt' | null;
+  quarter: 1 | 2 | 3 | 4 | null;
+  revenueActual: number | null;
+  revenueEstimate: number | null;
+  symbol: string;
+  year: number | null;
+};
+
+export type EarningsCalendarResponse = {
+  earningsCalendar: EarningsCalendarRow[];
+};
+
 export type Breakpoint = {
   announceDate: string;
   when: 'bmo' | 'amc' | 'dmh' | 'unknown';

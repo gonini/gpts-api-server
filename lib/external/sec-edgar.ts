@@ -7,6 +7,9 @@
 // - Exhibits 노이즈 필터링(R*.htm, css/js/img 등 제외), EPS 단위 'USD/share' 통일, 8-K Item 5.07 매핑 추가
 
 import { CacheService } from '@/lib/kv';
+import { EarningsCalendarRow, EarningsCalendarResponse } from '@/lib/core/schema';
+import { fetchFinnhubEarnings } from '@/lib/external/finnhub';
+import { fetchEarnings as fetchAlphaVantageEarnings } from '@/lib/external/yahoo-finance';
 
 // ---------- Const & Utils ----------
 const SEC_BASE = 'https://data.sec.gov';
@@ -16,6 +19,70 @@ const DEFAULT_UA =
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function parseUSD(s: string): number | null {
+  const m = s.trim().match(/\$?\s*([0-9][0-9,]*\.?[0-9]*)\s*(billion|million|thousand|bn|b|m|mm|k)?/i);
+  if (!m) return null;
+  const num = parseFloat(m[1].replace(/,/g, ''));
+  const unit = (m[2]||'').toLowerCase();
+  const mul = unit.startsWith('b') || unit==='bn' ? 1e9 : unit.startsWith('m') ? 1e6 : (unit.startsWith('k')||unit==='thousand') ? 1e3 : 1;
+  return Math.round(num * mul);
+}
+
+function extractHourFlag(text: string): 'amc'|'bmo'|'dmt'|null {
+  const t = text.toLowerCase();
+  if (/after (the )?market (close|closes)/i.test(t) || /\bafter-hours?\b/i.test(t)) return 'amc';
+  if (/before (the )?market (open|opens)/i.test(t) || /\bpre-market\b/i.test(t)) return 'bmo';
+  const time = t.match(/\b([0-1]?\d):([0-5]\d)\s*(a\.m\.|p\.m\.|am|pm)\b/i);
+  if (time) return time[3].startsWith('p') ? 'amc' : 'bmo';
+  return 'dmt';
+}
+
+async function getArchiveIndex(cik: string, accession: string) {
+  const acc = accession.replace(/-/g,'');
+  const base = `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${acc}`;
+  const res = await secFetch(`${base}/index.json`);
+  const json = await res.json();
+  return { base, items: (json?.directory?.item || []) as Array<{name: string}> };
+}
+
+async function mergeEstimates(ticker: string, rows: EarningsCalendarRow[], from: string, to: string) {
+  // Finnhub 추정치 병합
+  try {
+    const finnhubData = await fetchFinnhubEarnings(ticker, from, to);
+    for (const row of rows) {
+      const finnhubEntry = finnhubData.find(f => f.date === row.date);
+      if (finnhubEntry) {
+        if (row.epsEstimate === null && finnhubEntry.eps !== null) {
+          row.epsEstimate = finnhubEntry.eps;
+        }
+        if (row.revenueEstimate === null && finnhubEntry.revenue !== null) {
+          row.revenueEstimate = finnhubEntry.revenue;
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to fetch Finnhub estimates:', error);
+  }
+  
+  // Alpha Vantage 추정치 병합
+  try {
+    const alphaVantageData = await fetchAlphaVantageEarnings(ticker, from, to);
+    for (const row of rows) {
+      const avEntry = alphaVantageData.find(a => a.date === row.date);
+      if (avEntry) {
+        if (row.epsEstimate === null && avEntry.eps !== null) {
+          row.epsEstimate = avEntry.eps;
+        }
+        if (row.epsActual === null && avEntry.eps !== null) {
+          row.epsActual = avEntry.eps;
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to fetch Alpha Vantage estimates:', error);
+  }
 }
 
 async function secFetch(
@@ -265,6 +332,99 @@ export async function fetchAllSECReports(
 
   await CacheService.setex(cacheKey, 86400, JSON.stringify(normalized));
   return normalized;
+}
+
+/**
+ * Earnings Calendar 데이터 추출: 8-K Item 2.02 + Exhibit 99 + XBRL facts
+ */
+export async function fetchEarningsCalendar(
+  ticker: string,
+  from: string,
+  to: string
+): Promise<EarningsCalendarResponse> {
+  const cacheKey = `earncal:${ticker}:${from}:${to}`;
+  const cached = await CacheService.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  const cik = await getCIKFromTicker(ticker);
+  if (!cik) return { earningsCalendar: [] };
+
+  const raws = await fetchRawSECReports(cik, from, to);
+  
+  // 8-K Item 2.02만 필터링
+  const k8s = raws.filter(r => r.form.startsWith('8-K'));
+  
+  const rows: EarningsCalendarRow[] = [];
+  
+  for (const k8 of k8s) {
+    try {
+      // 8-K Item 2.02 확인
+      const baseUrl = `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${k8.accession.replace(/-/g, '')}`;
+      const doc = await secFetch(`${baseUrl}/${k8.primaryDocument}`);
+      const html = await doc.text();
+      
+      if (!html.includes('Item 2.02')) continue;
+      
+      // Exhibit 99 찾기
+      const { items } = await getArchiveIndex(cik, k8.accession);
+      const press = items
+        .map(i => i.name)
+        .filter(n => /ex[-_\.]?99|exhibit[-_\.]?99|press|earningsrelease/i.test(n))
+        .find(n => !/\.(jpg|jpeg|png|gif|svg)$/i.test(n));
+      
+      if (!press) continue;
+      
+      // Press release 파싱
+      const pressUrl = `${baseUrl}/${press}`;
+      const pressRes = await secFetch(pressUrl);
+      const pressText = await pressRes.text();
+      
+      // 기본 데이터 추출
+      const eventDate = k8.filingDate;
+      const quarterEnd = k8.reportDate || k8.filingDate;
+      
+      // EPS/Revenue 파싱 (간단한 패턴 매칭)
+      const epsMatch = pressText.match(/earnings per share[^$]{0,40}\$?\s*([0-9]+(?:\.[0-9]{1,3})?)/i);
+      const revenueMatch = pressText.match(/(net sales|revenue[s]?)[^$]{0,60}\$?\s*([0-9][0-9,\.]*)(\s*(billion|million|thousand|bn|b|m|mm|k))?/i);
+      
+      const epsActual = epsMatch ? parseFloat(epsMatch[1]) : null;
+      const revenueActual = revenueMatch ? parseUSD(`${revenueMatch[2]} ${revenueMatch[4]||''}`) : null;
+      
+      // Hour 추정
+      const hour = extractHourFlag(pressText);
+      
+      // Quarter 계산
+      const quarterEndDate = new Date(quarterEnd);
+      const month = quarterEndDate.getMonth() + 1;
+      const quarter = Math.ceil(month / 3) as 1 | 2 | 3 | 4;
+      const year = quarterEndDate.getFullYear();
+      
+      rows.push({
+        symbol: ticker.toUpperCase(),
+        date: eventDate,
+        year,
+        quarter,
+        hour,
+        epsActual,
+        epsEstimate: null,
+        revenueActual,
+        revenueEstimate: null
+      });
+      
+    } catch (error) {
+      console.warn(`Failed to process 8-K ${k8.accession}:`, error);
+      continue;
+    }
+  }
+  
+  // Finnhub/Alpha Vantage 추정치 병합 (기존 함수 활용)
+  await mergeEstimates(ticker, rows, from, to);
+  
+  rows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  
+  const response: EarningsCalendarResponse = { earningsCalendar: rows };
+  await CacheService.setex(cacheKey, 3600, JSON.stringify(response));
+  return response;
 }
 
 /**
