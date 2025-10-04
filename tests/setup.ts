@@ -7,7 +7,7 @@ Object.defineProperty(global, 'crypto', {
     subtle: {
       digest: jest.fn().mockImplementation(async (algorithm, data) => {
         // Simple mock implementation
-        const hash = Array.from(data).reduce((acc, byte) => acc + byte, 0);
+        const hash = Array.from(data as Uint8Array).reduce((acc, byte) => acc + byte, 0);
         return new Uint8Array([hash % 256, (hash >> 8) % 256, (hash >> 16) % 256, (hash >> 24) % 256]);
       })
     }
