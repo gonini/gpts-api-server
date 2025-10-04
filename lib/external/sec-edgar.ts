@@ -7,6 +7,7 @@
 // - Exhibits 노이즈 필터링(R*.htm, css/js/img 등 제외), EPS 단위 'USD/share' 통일, 8-K Item 5.07 매핑 추가
 
 import { CacheService } from '@/lib/kv';
+import { getCIKForTicker, isCompanyNameMatch } from '@/lib/data/ticker-cik-mapping';
 import { EarningsCalendarRow, EarningsCalendarResponse } from '@/lib/core/schema';
 import { fetchFinnhubEarnings } from '@/lib/external/finnhub';
 import { fetchEarnings as fetchAlphaVantageEarnings } from '@/lib/external/yahoo-finance';
@@ -318,14 +319,43 @@ export async function fetchAllSECReports(
   from: string,
   to: string
 ): Promise<NormalizedSECFiling[]> {
+  console.log(`[SEC] fetchAllSECReports called: ticker=${ticker}, from=${from}, to=${to}`);
   const cacheKey = `sec_reports:${ticker}:${from}:${to}`;
   const cached = await CacheService.get(cacheKey);
-  if (cached) return JSON.parse(cached);
+  if (cached) {
+    console.log(`[SEC] Returning cached data for ${ticker}`);
+    return JSON.parse(cached);
+  }
 
-  const cik = await getCIKFromTicker(ticker);
-  if (!cik) return [];
+  // CIK 조회 (매칭 테이블 우선, 없으면 API 호출)
+  let cik = getCIKForTicker(ticker);
+  if (!cik) {
+    console.log(`[SEC] No CIK found in mapping table for ${ticker}, trying API...`);
+    cik = await getCIKFromTicker(ticker);
+  }
+  
+  if (!cik) {
+    console.log(`[SEC] No CIK found for ticker ${ticker}`);
+    return [];
+  }
 
-  const raws = await fetchRawSECReports(cik, from, to);
+  // 날짜 범위 확인: SEC submissions API는 최근 데이터만 제공
+  const fromDate = new Date(from);
+  const currentDate = new Date();
+  const twoYearsAgo = new Date(currentDate.getFullYear() - 2, currentDate.getMonth(), currentDate.getDate());
+  
+  if (fromDate < twoYearsAgo) {
+    console.log(`[SEC] Warning: Requested date range (${from} to ${to}) includes historical data older than 2 years. SEC submissions API only provides recent filings. Consider using a more recent date range.`);
+  }
+
+  console.log(`[SEC] fetchAllSECReports: ticker=${ticker}, cik=${cik}, from=${from}, to=${to}`);
+  const raws = await fetchRawSECReports(cik, from, to, ticker);
+  console.log(`[SEC] fetchRawSECReports returned ${raws.length} filings`);
+  
+  if (raws.length === 0 && fromDate < twoYearsAgo) {
+    console.log(`[SEC] No filings found for ${ticker} from ${from} to ${to}. This may be because SEC submissions API only provides recent data (typically last 2-3 years). For historical data, consider using a more recent date range.`);
+  }
+  
   const normalized = await Promise.all(
     raws.map((r) => normalizeSECFiling(r, ticker, cik))
   );
@@ -471,10 +501,12 @@ export async function fetchRevenueData(
 }
 
 // ---------- Raw filings (submissions) ----------
-async function fetchRawSECReports(cik: string, from: string, to: string): Promise<RawRecentFiling[]> {
+async function fetchRawSECReports(cik: string, from: string, to: string, ticker?: string): Promise<RawRecentFiling[]> {
   const url = `${SEC_BASE}/submissions/CIK${cik.padStart(10, '0')}.json`;
   const res = await secFetch(url);
   const data = await res.json();
+  const fromDt = new Date(from);
+  const toDt = new Date(to);
 
   const filings = data?.filings?.recent || {};
   const forms: string[] = filings.form || [];
@@ -482,12 +514,11 @@ async function fetchRawSECReports(cik: string, from: string, to: string): Promis
   const filingDate: string[] = filings.filingDate || [];
   const reportDate: string[] = filings.reportDate || filings.periodOfReport || [];
   const primaryDoc: string[] = filings.primaryDocument || [];
-  const fromDt = new Date(from);
-  const toDt = new Date(to);
 
   const allow = new Set(['10-K', '10-Q', '8-K', '10-K/A', '10-Q/A', '8-K/A']);
   const out: RawRecentFiling[] = [];
 
+  // 1) recent filings 처리
   for (let i = 0; i < forms.length; i++) {
     const f = forms[i];
     if (!allow.has(f)) continue;
@@ -509,8 +540,167 @@ async function fetchRawSECReports(cik: string, from: string, to: string): Promis
     });
   }
 
+  // 2) shards 병합: files[] 배열의 모든 shard JSON 수집
+  const files = data?.filings?.files || [];
+  for (const file of files) {
+    try {
+      const shardUrl = `${SEC_BASE}/submissions/CIK${cik.padStart(10, '0')}/${file.name}`;
+      const shardRes = await secFetch(shardUrl);
+      const shardData = await shardRes.json();
+      
+      const shardFilings = shardData?.filings?.recent || {};
+      const shardForms: string[] = shardFilings.form || [];
+      const shardAccessions: string[] = shardFilings.accessionNumber || [];
+      const shardFilingDate: string[] = shardFilings.filingDate || [];
+      const shardReportDate: string[] = shardFilings.reportDate || shardFilings.periodOfReport || [];
+      const shardPrimaryDoc: string[] = shardFilings.primaryDocument || [];
+      
+      for (let i = 0; i < shardForms.length; i++) {
+        const f = shardForms[i];
+        if (!allow.has(f)) continue;
+        const fDate = new Date(shardFilingDate[i]);
+        if (isNaN(fDate.getTime())) continue;
+        if (fDate < fromDt || fDate > toDt) continue;
+
+        out.push({
+          form: f,
+          accession: shardAccessions[i],
+          filingDate: shardFilingDate[i],
+          reportDate: shardReportDate?.[i],
+          primaryDocument: shardPrimaryDoc?.[i] || 'index.html',
+          size: shardFilings.size?.[i],
+          isXBRL: shardFilings.isXBRL?.[i],
+          isInlineXBRL: shardFilings.isInlineXBRL?.[i],
+          companyName: data?.name || 'Unknown Company',
+          tickers: data?.tickers || [],
+        });
+      }
+    } catch (e) {
+      console.warn(`[SEC] Shard ${file.name} failed: ${e}`);
+    }
+  }
+
+  // 3) full-index fallback: submissions API로 부족한 경우 (최근 2-3년 이외)
+  console.log(`[SEC] Checking fallback condition: fromDt.getFullYear()=${fromDt.getFullYear()}, out.length=${out.length}`);
+  const currentYear = new Date().getFullYear();
+  const isHistoricalRequest = fromDt.getFullYear() < (currentYear - 2);
+  
+  if (isHistoricalRequest || out.length === 0) {
+    console.log(`[SEC] Attempting full-index fallback for historical data (${fromDt.getFullYear()})`);
+    const historical = await fetchFromFullIndex(cik, from, to, allow, ticker);
+    console.log(`[SEC] Found ${historical.length} historical filings`);
+    out.push(...historical);
+  } else {
+    console.log(`[SEC] Skipping full-index fallback (recent data available)`);
+  }
+  
+  console.log(`[SEC] fetchRawSECReports returning ${out.length} total filings`);
+
   // 최신순
   out.sort((a, b) => new Date(b.filingDate).getTime() - new Date(a.filingDate).getTime());
+  return out;
+}
+
+/**
+ * EDGAR full-index에서 과거 데이터 수집
+ * master.idx 포맷: CIK|Company|Form|Date Filed|Filename
+ */
+async function fetchFromFullIndex(cik: string, from: string, to: string, allowForms: Set<string>, ticker?: string): Promise<RawRecentFiling[]> {
+  const fromDt = new Date(from);
+  const toDt = new Date(to);
+  const out: RawRecentFiling[] = [];
+  
+  console.log(`[SEC] fetchFromFullIndex: CIK=${cik}, from=${from}, to=${to}`);
+  
+  // 연도별로 full-index 스캔 (from~to 범위)
+  const startYear = fromDt.getFullYear();
+  const endYear = toDt.getFullYear();
+  
+  console.log(`[SEC] Scanning years ${startYear} to ${endYear}`);
+  
+  for (let year = startYear; year <= endYear; year++) {
+    for (let qtr = 1; qtr <= 4; qtr++) {
+      try {
+        const indexUrl = `https://www.sec.gov/Archives/edgar/full-index/${year}/QTR${qtr}/master.idx`;
+        console.log(`[SEC] Fetching ${indexUrl}`);
+        const res = await secFetch(indexUrl);
+        const text = await res.text();
+        
+        const lines = text.split('\n');
+        console.log(`[SEC] Found ${lines.length} lines in ${year}Q${qtr}`);
+        
+        for (const line of lines) {
+          if (!line.trim() || line.startsWith('CIK')) continue;
+          
+          const parts = line.split('|');
+          if (parts.length < 5) continue;
+          
+          const [lineCik, company, form, dateFiled, filename] = parts;
+          if (!allowForms.has(form)) continue;
+          
+          // CIK 매칭: 정확한 CIK 또는 회사명으로 매칭
+          const isCIKMatch = lineCik === cik;
+          
+          // 회사명 매칭: 매칭 테이블 사용
+          const isCompanyMatch = ticker && (
+            // 매칭 테이블에서 확인
+            isCompanyNameMatch(ticker, company) ||
+            // 일반적인 회사명 매칭 (공백, 특수문자 제거)
+            company.toLowerCase().replace(/[^a-z0-9]/g, '').includes(ticker.toLowerCase().replace(/[^a-z0-9]/g, ''))
+          );
+          
+          if (!isCIKMatch && !isCompanyMatch) continue;
+          
+          const fDate = new Date(dateFiled);
+          if (isNaN(fDate.getTime())) continue;
+          if (fDate < fromDt || fDate > toDt) continue;
+          
+          console.log(`[SEC] Found matching filing: ${form} on ${dateFiled}`);
+          
+          // accession 추정: filename에서 추출
+          const accessionMatch = filename.match(/(\d{10}-\d{2}-\d{6})/);
+          const accession = accessionMatch ? accessionMatch[1] : `000${cik}-${dateFiled.replace(/-/g, '')}-000000`;
+          
+          out.push({
+            form,
+            accession,
+            filingDate: dateFiled,
+            reportDate: null,
+            primaryDocument: filename,
+            size: null,
+            isXBRL: false,
+            isInlineXBRL: false,
+            companyName: company,
+            tickers: [ticker || ''],
+          });
+        }
+      } catch (e) {
+        console.warn(`[SEC] Full-index ${year}Q${qtr} failed: ${e}`);
+      }
+    }
+  }
+  
+  console.log(`[SEC] fetchFromFullIndex returning ${out.length} filings`);
+  return out;
+}
+
+// ---------- Historical filings (for older data) ----------
+async function fetchHistoricalSECReports(cik: string, from: string, to: string): Promise<RawRecentFiling[]> {
+  const fromDt = new Date(from);
+  const toDt = new Date(to);
+  
+  // SEC EDGAR는 과거 데이터를 위해 다른 접근이 필요합니다
+  // companyfacts API를 통해 과거 데이터를 시뮬레이션
+  const facts = await getCompanyFacts(cik);
+  if (!facts) return [];
+
+  const out: RawRecentFiling[] = [];
+  const allow = new Set(['10-K', '10-Q', '8-K', '10-K/A', '10-Q/A', '8-K/A']);
+  
+  // companyfacts에서 과거 데이터를 기반으로 시뮬레이션된 filing 생성
+  // 실제로는 SEC EDGAR의 다른 엔드포인트나 아카이브를 사용해야 합니다
+  console.log(`[SEC] Historical data requested for ${from} to ${to}, but SEC submissions API only provides recent data`);
+  
   return out;
 }
 
@@ -532,7 +722,7 @@ async function normalizeSECFiling(
     company: raw.companyName || null,
     form: raw.form as any,
     accession: raw.accession,
-    filed_at: new Date(raw.filingDate).toISOString(),
+    filed_at: raw.filingDate ? new Date(raw.filingDate).toISOString() : new Date().toISOString(),
     period_of_report: toISODate(raw.reportDate) || null,
     event_date: parsed.event_date || toISODate(raw.reportDate) || toISODate(raw.filingDate),
     is_amendment: isAmend,

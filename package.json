@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "update-mapping": "node scripts/update-ticker-mapping.js"
   },
   "dependencies": {
     "@vercel/kv": "^1.0.0",
@@ -23,7 +27,9 @@
   },
   "devDependencies": {
     "@types/cheerio": "^0.22.35",
+    "@types/jest": "^30.0.0",
     "@types/luxon": "^3.7.1",
+    "@types/nock": "^10.0.3",
     "@types/node": "^20.0.0",
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
@@ -31,8 +37,11 @@
     "autoprefixer": "^10.4.0",
     "eslint": "^8.0.0",
     "eslint-config-next": "14.0.0",
+    "jest": "^30.2.0",
+    "nock": "^14.0.10",
     "postcss": "^8.4.0",
     "tailwindcss": "^3.3.0",
+    "ts-jest": "^29.4.4",
     "ts-node": "^10.9.2",
     "typescript": "^5.0.0"
   }

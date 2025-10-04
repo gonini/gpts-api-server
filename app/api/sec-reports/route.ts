@@ -75,10 +75,21 @@ export async function GET(request: NextRequest) {
 
     console.log(`[SEC Reports API] Fetching reports for ${ticker} from ${from} to ${to}`);
 
+    // 날짜 범위 확인 (과거 데이터 요청 여부)
+    const currentDate = new Date();
+    const twoYearsAgo = new Date(currentDate.getFullYear() - 2, currentDate.getMonth(), currentDate.getDate());
+    const isHistoricalRequest = fromDate < twoYearsAgo;
+
     // SEC EDGAR 보고서 조회
     const reports = await fetchAllSECReports(ticker.toUpperCase(), from, to);
 
     console.log(`[SEC Reports API] Found ${reports.length} reports for ${ticker}`);
+
+    // 응답에 경고 메시지 추가
+    const warnings = [];
+    if (isHistoricalRequest && reports.length === 0) {
+      warnings.push('SEC submissions API only provides recent filings (typically last 2-3 years). For historical data, consider using a more recent date range.');
+    }
 
     return NextResponse.json({
       success: true,
@@ -88,10 +99,12 @@ export async function GET(request: NextRequest) {
         to,
         total_reports: reports.length,
         reports: reports,
+        warnings: warnings,
         metadata: {
           timestamp: new Date().toISOString(),
           source: 'SEC EDGAR',
-          api_version: '1.0.0'
+          api_version: '1.0.0',
+          note: isHistoricalRequest ? 'Historical data request - SEC submissions API may have limited historical coverage' : undefined
         }
       }
     });
