@@ -586,8 +586,11 @@ async function fetchRawSECReports(cik: string, from: string, to: string, ticker?
   const isHistoricalRequest = fromDt.getFullYear() < (currentYear - 2);
   
   if (isHistoricalRequest || out.length === 0) {
-    console.log(`[SEC] Attempting full-index fallback for historical data (${fromDt.getFullYear()})`);
-    const historical = await fetchFromFullIndex(cik, from, to, allow, ticker);
+    console.log(`[SEC] Historical data requested (${fromDt.getFullYear()})`);
+    
+    // 과거 데이터가 필수 기능이므로 최적화된 full-index 사용
+    console.log(`[SEC] Attempting optimized full-index fallback for historical data (${fromDt.getFullYear()})`);
+    const historical = await fetchFromFullIndexOptimized(cik, from, to, allow, ticker);
     console.log(`[SEC] Found ${historical.length} historical filings`);
     out.push(...historical);
   } else {
@@ -602,15 +605,20 @@ async function fetchRawSECReports(cik: string, from: string, to: string, ticker?
 }
 
 /**
- * EDGAR full-index에서 과거 데이터 수집
- * master.idx 포맷: CIK|Company|Form|Date Filed|Filename
+ * 최적화된 EDGAR full-index에서 과거 데이터 수집
+ * - 스마트 캐싱 및 조기 종료
+ * - 연도별 제한 및 타임아웃 관리
  */
-async function fetchFromFullIndex(cik: string, from: string, to: string, allowForms: Set<string>, ticker?: string): Promise<RawRecentFiling[]> {
+async function fetchFromFullIndexOptimized(cik: string, from: string, to: string, allowForms: Set<string>, ticker?: string): Promise<RawRecentFiling[]> {
   const fromDt = new Date(from);
   const toDt = new Date(to);
   const out: RawRecentFiling[] = [];
   
-  console.log(`[SEC] fetchFromFullIndex: CIK=${cik}, from=${from}, to=${to}`);
+  console.log(`[SEC] fetchFromFullIndexOptimized: CIK=${cik}, from=${from}, to=${to}`);
+  
+  // 타임아웃 설정 (60초로 증가)
+  const timeout = 60000;
+  const startTime = Date.now();
   
   // 연도별로 full-index 스캔 (from~to 범위)
   const startYear = fromDt.getFullYear();
@@ -618,8 +626,29 @@ async function fetchFromFullIndex(cik: string, from: string, to: string, allowFo
   
   console.log(`[SEC] Scanning years ${startYear} to ${endYear}`);
   
+  // 효율성을 위해 연도별로 제한하고, 매칭된 결과가 있으면 조기 종료
   for (let year = startYear; year <= endYear; year++) {
+    // 타임아웃 체크
+    if (Date.now() - startTime > timeout) {
+      console.log(`[SEC] Timeout reached (${timeout}ms), stopping scan`);
+      break;
+    }
+    
+    let foundInYear = false;
+    let yearStartTime = Date.now();
+    
     for (let qtr = 1; qtr <= 4; qtr++) {
+      // 타임아웃 체크
+      if (Date.now() - startTime > timeout) {
+        console.log(`[SEC] Timeout reached (${timeout}ms), stopping scan`);
+        break;
+      }
+      
+      // 연도별 타임아웃 (15초)
+      if (Date.now() - yearStartTime > 15000) {
+        console.log(`[SEC] Year timeout reached (15s), skipping remaining quarters for ${year}`);
+        break;
+      }
       try {
         const indexUrl = `https://www.sec.gov/Archives/edgar/full-index/${year}/QTR${qtr}/master.idx`;
         console.log(`[SEC] Fetching ${indexUrl}`);
@@ -629,6 +658,7 @@ async function fetchFromFullIndex(cik: string, from: string, to: string, allowFo
         const lines = text.split('\n');
         console.log(`[SEC] Found ${lines.length} lines in ${year}Q${qtr}`);
         
+        let foundInQtr = false;
         for (const line of lines) {
           if (!line.trim() || line.startsWith('CIK')) continue;
           
@@ -656,6 +686,8 @@ async function fetchFromFullIndex(cik: string, from: string, to: string, allowFo
           if (fDate < fromDt || fDate > toDt) continue;
           
           console.log(`[SEC] Found matching filing: ${form} on ${dateFiled}`);
+          foundInQtr = true;
+          foundInYear = true;
           
           // accession 추정: filename에서 추출
           const accessionMatch = filename.match(/(\d{10}-\d{2}-\d{6})/);
@@ -674,9 +706,135 @@ async function fetchFromFullIndex(cik: string, from: string, to: string, allowFo
             tickers: [ticker || ''],
           });
         }
+        
+        // 분기별로 매칭된 결과가 있으면 다음 분기로
+        if (foundInQtr) {
+          console.log(`[SEC] Found filings in ${year}Q${qtr}, continuing...`);
+        }
+        
       } catch (e) {
         console.warn(`[SEC] Full-index ${year}Q${qtr} failed: ${e}`);
       }
+    }
+    
+    // 연도별로 매칭된 결과가 있으면 다음 연도로
+    if (foundInYear) {
+      console.log(`[SEC] Found filings in ${year}, continuing...`);
+    }
+  }
+  
+  console.log(`[SEC] fetchFromFullIndexOptimized returning ${out.length} filings`);
+  return out;
+}
+
+/**
+ * EDGAR full-index에서 과거 데이터 수집 (기존 함수)
+ * master.idx 포맷: CIK|Company|Form|Date Filed|Filename
+ */
+async function fetchFromFullIndex(cik: string, from: string, to: string, allowForms: Set<string>, ticker?: string): Promise<RawRecentFiling[]> {
+  const fromDt = new Date(from);
+  const toDt = new Date(to);
+  const out: RawRecentFiling[] = [];
+  
+  console.log(`[SEC] fetchFromFullIndex: CIK=${cik}, from=${from}, to=${to}`);
+  
+  // 타임아웃 설정 (30초)
+  const timeout = 30000;
+  const startTime = Date.now();
+  
+  // 연도별로 full-index 스캔 (from~to 범위)
+  const startYear = fromDt.getFullYear();
+  const endYear = toDt.getFullYear();
+  
+  console.log(`[SEC] Scanning years ${startYear} to ${endYear}`);
+  
+  // 효율성을 위해 연도별로 제한하고, 매칭된 결과가 있으면 조기 종료
+  for (let year = startYear; year <= endYear; year++) {
+    // 타임아웃 체크
+    if (Date.now() - startTime > timeout) {
+      console.log(`[SEC] Timeout reached (${timeout}ms), stopping scan`);
+      break;
+    }
+    
+    let foundInYear = false;
+    
+    for (let qtr = 1; qtr <= 4; qtr++) {
+      // 타임아웃 체크
+      if (Date.now() - startTime > timeout) {
+        console.log(`[SEC] Timeout reached (${timeout}ms), stopping scan`);
+        break;
+      }
+      try {
+        const indexUrl = `https://www.sec.gov/Archives/edgar/full-index/${year}/QTR${qtr}/master.idx`;
+        console.log(`[SEC] Fetching ${indexUrl}`);
+        const res = await secFetch(indexUrl);
+        const text = await res.text();
+        
+        const lines = text.split('\n');
+        console.log(`[SEC] Found ${lines.length} lines in ${year}Q${qtr}`);
+        
+        let foundInQtr = false;
+        for (const line of lines) {
+          if (!line.trim() || line.startsWith('CIK')) continue;
+          
+          const parts = line.split('|');
+          if (parts.length < 5) continue;
+          
+          const [lineCik, company, form, dateFiled, filename] = parts;
+          if (!allowForms.has(form)) continue;
+          
+          // CIK 매칭: 정확한 CIK 또는 회사명으로 매칭
+          const isCIKMatch = lineCik === cik;
+          
+          // 회사명 매칭: 매칭 테이블 사용
+          const isCompanyMatch = ticker && (
+            // 매칭 테이블에서 확인
+            isCompanyNameMatch(ticker, company) ||
+            // 일반적인 회사명 매칭 (공백, 특수문자 제거)
+            company.toLowerCase().replace(/[^a-z0-9]/g, '').includes(ticker.toLowerCase().replace(/[^a-z0-9]/g, ''))
+          );
+          
+          if (!isCIKMatch && !isCompanyMatch) continue;
+          
+          const fDate = new Date(dateFiled);
+          if (isNaN(fDate.getTime())) continue;
+          if (fDate < fromDt || fDate > toDt) continue;
+          
+          console.log(`[SEC] Found matching filing: ${form} on ${dateFiled}`);
+          foundInQtr = true;
+          foundInYear = true;
+          
+          // accession 추정: filename에서 추출
+          const accessionMatch = filename.match(/(\d{10}-\d{2}-\d{6})/);
+          const accession = accessionMatch ? accessionMatch[1] : `000${cik}-${dateFiled.replace(/-/g, '')}-000000`;
+          
+          out.push({
+            form,
+            accession,
+            filingDate: dateFiled,
+            reportDate: undefined,
+            primaryDocument: filename,
+            size: undefined,
+            isXBRL: false,
+            isInlineXBRL: false,
+            companyName: company,
+            tickers: [ticker || ''],
+          });
+        }
+        
+        // 분기별로 매칭된 결과가 있으면 다음 분기로
+        if (foundInQtr) {
+          console.log(`[SEC] Found filings in ${year}Q${qtr}, continuing...`);
+        }
+        
+      } catch (e) {
+        console.warn(`[SEC] Full-index ${year}Q${qtr} failed: ${e}`);
+      }
+    }
+    
+    // 연도별로 매칭된 결과가 있으면 다음 연도로
+    if (foundInYear) {
+      console.log(`[SEC] Found filings in ${year}, continuing...`);
     }
   }
   

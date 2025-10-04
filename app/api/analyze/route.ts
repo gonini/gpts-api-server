@@ -174,7 +174,7 @@ async function handleRequest(request: NextRequest) {
 
     // 3. 변곡점 탐지
     console.log('Earnings data for breakpoint detection:', JSON.stringify(earnings, null, 2));
-    const breakpoints = detectBreakpoints(earnings);
+    const breakpoints = detectBreakpoints(prices, earnings);
     console.log('Detected breakpoints:', JSON.stringify(breakpoints, null, 2));
     console.log(`Total breakpoints detected: ${breakpoints.length}`);
 
