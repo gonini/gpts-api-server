@@ -616,23 +616,38 @@ async function fetchFromFullIndexOptimized(cik: string, from: string, to: string
   
   console.log(`[SEC] fetchFromFullIndexOptimized: CIK=${cik}, from=${from}, to=${to}`);
   
-  // 타임아웃 설정 (60초로 증가)
-  const timeout = 60000;
-  const startTime = Date.now();
-  
   // 연도별로 full-index 스캔 (from~to 범위)
   const startYear = fromDt.getFullYear();
   const endYear = toDt.getFullYear();
+  const yearSpan = endYear - startYear + 1;
+  
+  // 적응형 타임아웃 설정: 연도 수에 따라 동적 조정
+  const baseTimeout = 30000; // 30초 기본
+  const perYearTimeout = 8000; // 연도당 8초 추가 (감소)
+  const maxTimeout = yearSpan > 15 ? 180000 : 300000; // 15년 이상은 3분, 그 외 5분
+  const timeout = Math.min(baseTimeout + (yearSpan * perYearTimeout), maxTimeout);
+  
+  console.log(`[SEC] Dynamic timeout: ${yearSpan} years → ${timeout/1000}s timeout`);
+  const startTime = Date.now();
   
   console.log(`[SEC] Scanning years ${startYear} to ${endYear}`);
   
   // 효율성을 위해 연도별로 제한하고, 매칭된 결과가 있으면 조기 종료
-  for (let year = startYear; year <= endYear; year++) {
+  // 대량 데이터 요청 시 최신 연도부터 처리 (역순)
+  const years = yearSpan > 10 ? 
+    Array.from({length: yearSpan}, (_, i) => endYear - i) : // 역순
+    Array.from({length: yearSpan}, (_, i) => startYear + i); // 순차
+  
+  for (const year of years) {
     // 타임아웃 체크
     if (Date.now() - startTime > timeout) {
       console.log(`[SEC] Timeout reached (${timeout}ms), stopping scan`);
       break;
     }
+    
+    // 진행률 표시
+    const progress = ((year - startYear + 1) / yearSpan * 100).toFixed(1);
+    console.log(`[SEC] Processing year ${year} (${progress}% complete)`);
     
     let foundInYear = false;
     let yearStartTime = Date.now();
@@ -644,9 +659,10 @@ async function fetchFromFullIndexOptimized(cik: string, from: string, to: string
         break;
       }
       
-      // 연도별 타임아웃 (15초)
-      if (Date.now() - yearStartTime > 15000) {
-        console.log(`[SEC] Year timeout reached (15s), skipping remaining quarters for ${year}`);
+      // 연도별 타임아웃 (동적 조정: 5초 + 분기당 2초)
+      const yearTimeout = 5000 + (4 * 2000); // 13초
+      if (Date.now() - yearStartTime > yearTimeout) {
+        console.log(`[SEC] Year timeout reached (${yearTimeout/1000}s), skipping remaining quarters for ${year}`);
         break;
       }
       try {
@@ -720,6 +736,17 @@ async function fetchFromFullIndexOptimized(cik: string, from: string, to: string
     // 연도별로 매칭된 결과가 있으면 다음 연도로
     if (foundInYear) {
       console.log(`[SEC] Found filings in ${year}, continuing...`);
+    } else {
+      console.log(`[SEC] No filings found in ${year}, continuing...`);
+    }
+    
+    // 대량 데이터 요청 시 조기 종료 전략
+    const isLargeRange = yearSpan > 10;
+    const maxFilings = isLargeRange ? 100 : 200; // 대량 요청 시 100개로 제한
+    
+    if (out.length >= maxFilings) {
+      console.log(`[SEC] Found sufficient data (${out.length} filings), stopping scan for large range`);
+      break;
     }
   }
   
