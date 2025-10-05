@@ -9,7 +9,8 @@ import { buildSourceUrls } from '@/lib/core/source-urls';
 import { shouldUseFinnhubEarnings, shouldUseFinnhubPrices } from '@/lib/external/finnhub';
 import { fetchAllSECReports } from '@/lib/external/sec-edgar';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 /**
  * Extract earnings data from SEC Reports for historical analysis

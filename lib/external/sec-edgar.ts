@@ -308,6 +308,7 @@ type RawRecentFiling = {
   isInlineXBRL?: boolean;
   companyName: string;
   tickers: string[];
+  sourceCik?: string; // CIK associated with this specific filing line (from submissions or full-index)
 };
 
 // ---------- Public: Reports + Revenue ----------
@@ -537,6 +538,7 @@ async function fetchRawSECReports(cik: string, from: string, to: string, ticker?
       isInlineXBRL: filings.isInlineXBRL?.[i],
       companyName: data?.name || 'Unknown Company',
       tickers: data?.tickers || [],
+      sourceCik: (data?.cik || String(Number(cik)))
     });
   }
 
@@ -573,6 +575,7 @@ async function fetchRawSECReports(cik: string, from: string, to: string, ticker?
           isInlineXBRL: shardFilings.isInlineXBRL?.[i],
           companyName: data?.name || 'Unknown Company',
           tickers: data?.tickers || [],
+          sourceCik: (data?.cik || String(Number(cik)))
         });
       }
     } catch (e) {
@@ -720,6 +723,7 @@ async function fetchFromFullIndexOptimized(cik: string, from: string, to: string
             isInlineXBRL: false,
             companyName: company,
             tickers: [ticker || ''],
+            sourceCik: lineCik,
           });
         }
         
@@ -846,6 +850,7 @@ async function fetchFromFullIndex(cik: string, from: string, to: string, allowFo
             isInlineXBRL: false,
             companyName: company,
             tickers: [ticker || ''],
+            sourceCik: lineCik,
           });
         }
         
@@ -896,10 +901,15 @@ async function normalizeSECFiling(
   cik: string
 ): Promise<NormalizedSECFiling> {
   const accessionPath = raw.accession.replace(/-/g, '');
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accessionPath}`;
+  const filingCik = (raw.sourceCik && String(raw.sourceCik)) || cik;
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${Number(filingCik)}/${accessionPath}`;
 
   const parsed = await parseSECDocument(raw, baseUrl, ticker);
   const isAmend = raw.form.endsWith('/A');
+
+  const primaryUrl = /^edgar\//i.test(raw.primaryDocument)
+    ? `https://www.sec.gov/Archives/${raw.primaryDocument}`
+    : `${baseUrl}/${raw.primaryDocument}`;
 
   const normalized: NormalizedSECFiling = {
     cik,
@@ -912,7 +922,7 @@ async function normalizeSECFiling(
     event_date: parsed.event_date || toISODate(raw.reportDate) || toISODate(raw.filingDate),
     is_amendment: isAmend,
     amends: parsed.amends,
-    urls: { index: `${baseUrl}/index.json`, primary: `${baseUrl}/${raw.primaryDocument}` },
+    urls: { index: `${baseUrl}/index.json`, primary: primaryUrl },
     items: parsed.items,
     event_types: parsed.event_types,
     sections: parsed.sections,
@@ -987,25 +997,48 @@ async function parseSECDocument(
 async function parse8KItems(raw: RawRecentFiling, baseUrl: string): Promise<string[]> {
   if (!raw.form.startsWith('8-K')) return [];
 
-  try {
-    const url = `${baseUrl}/${raw.primaryDocument}`;
-    const res = await secFetch(url, { headers: { Accept: 'text/html,*/*' } });
-    const html = await res.text();
+  const buildDocUrl = (name: string) =>
+    /^edgar\//i.test(name) ? `https://www.sec.gov/Archives/${name}` : `${baseUrl}/${name}`;
 
-    // 많은 8-K가 &nbsp; / 소문자 / 구두점 변형을 포함
-    // "Item 2.02", "ITEM 2.02.", "Item 2.02 – Results..."
+  const extractItems = (html: string) => {
     const norm = html.replace(/\s+/g, ' ').replace(/&nbsp;/gi, ' ');
     const regex = /Item\s+(\d+\.\d+)\b/gi;
     const out: string[] = [];
     let m: RegExpExecArray | null;
-    while ((m = regex.exec(norm))) {
-      out.push(m[1]);
-    }
+    while ((m = regex.exec(norm))) out.push(m[1]);
     return unique(out);
+  };
+
+  // 1) Try primary document first (some older filings point to .txt submission)
+  try {
+    const primaryUrl = buildDocUrl(raw.primaryDocument);
+    const res = await secFetch(primaryUrl, { headers: { Accept: 'text/html,*/*' } });
+    const html = await res.text();
+    const items = extractItems(html);
+    if (items.length) return items;
   } catch (e) {
-    console.warn(`[SEC] parse8KItems failed: ${e}`);
-    return [];
+    console.warn(`[SEC] parse8KItems primary failed: ${e}`);
   }
+
+  // 2) Fallback: scan index.json for 8-K HTML body (d8k.htm, 8k.htm, form8k.htm, etc.)
+  try {
+    const idxRes = await secFetch(`${baseUrl}/index.json`);
+    const idx = await idxRes.json();
+    const list: string[] = (idx?.directory?.item || []).map((it: any) => String(it.name || ''));
+    const candidates = list.filter((n) => /(d?8[-_]?k|form8[-_]?k)\.(htm|html|txt)$/i.test(n));
+    for (const name of candidates) {
+      try {
+        const res = await secFetch(buildDocUrl(name), { headers: { Accept: 'text/html,*/*' } });
+        const html = await res.text();
+        const items = extractItems(html);
+        if (items.length) return items;
+      } catch {}
+    }
+  } catch (e) {
+    console.warn(`[SEC] parse8KItems index fallback failed: ${e}`);
+  }
+
+  return [];
 }
 
 // ---------- 10-K / 10-Q Sections (R*.htm 백업 파싱 + 정규식 확장) ----------
@@ -1031,6 +1064,9 @@ async function parseSections(raw: RawRecentFiling, baseUrl: string): Promise<any
     return html.replace(/\s+/g, ' ').replace(/&nbsp;/gi, ' ');
   };
 
+  const buildDocUrl = (name: string) =>
+    /^edgar\//i.test(name) ? `https://www.sec.gov/Archives/${name}` : `${baseUrl}/${name}`;
+
   // 패턴: Item 헤더 + 대체 표현(‘Item’이 누락된 경우도 커버)
   const RE_MDNA = [
     /Item\s+(7|2)\s*\.?\s*Management[’'`]s?\s*Discussion[^]{0,120}?Results of Operations/i,
@@ -1047,7 +1083,7 @@ async function parseSections(raw: RawRecentFiling, baseUrl: string): Promise<any
 
   // 1) primary 문서
   try {
-    const primaryText = await fetchText(`${baseUrl}/${raw.primaryDocument}`);
+    const primaryText = await fetchText(buildDocUrl(raw.primaryDocument));
     grab('business', primaryText, RE_BUSINESS);
     grab('risk_factors', primaryText, RE_RISK);
     grab('mdna', primaryText, RE_MDNA);
@@ -1064,11 +1100,32 @@ async function parseSections(raw: RawRecentFiling, baseUrl: string): Promise<any
       .slice(0, 8);
 
     for (const name of Rs) {
-      const text = await fetchText(`${baseUrl}/${name}`);
+      const text = await fetchText(buildDocUrl(name));
       grab('business', text, RE_BUSINESS);
       grab('risk_factors', text, RE_RISK);
       grab('mdna', text, RE_MDNA);
       if (sections.business && sections.mdna) break;
+    }
+  } catch {}
+
+  // 3) 추가 fallback: 명시적인 10-Q/10-K 본문 파일 (d10q.htm, 10q.htm, form10q.htm 등)
+  try {
+    const idxRes = await secFetch(`${baseUrl}/index.json`);
+    const idx = await idxRes.json();
+    const files: string[] = (idx?.directory?.item || []).map((it: any) => String(it.name || ''));
+    const is10Q = raw.form.startsWith('10-Q');
+    const bodyPatterns = is10Q
+      ? [/(^|\/)d?10[-_]?q\.(htm|html|txt)$/i, /form10[-_]?q\.(htm|html|txt)$/i]
+      : [/(^|\/)d?10[-_]?k\.(htm|html|txt)$/i, /form10[-_]?k\.(htm|html|txt)$/i];
+    const candidates = files.filter((n) => bodyPatterns.some((re) => re.test(n)));
+    for (const name of candidates) {
+      try {
+        const text = await fetchText(buildDocUrl(name));
+        grab('business', text, RE_BUSINESS);
+        grab('risk_factors', text, RE_RISK);
+        grab('mdna', text, RE_MDNA);
+        if (sections.business || sections.risk_factors || sections.mdna) break;
+      } catch {}
     }
   } catch {}
 
@@ -1147,22 +1204,13 @@ function pickUnit(units: Record<string, any[]> | undefined) {
 
 // 모든 USD 계열 유닛의 시계열을 합쳐 후보군을 만든다. (USD가 없으면 전체 유닛 평탄화)
 function collectUSDUnitFacts(units: Record<string, any[]>): any[] {
-  const all = Object.entries(units)
+  // 과거 요청을 위해 최근 5년 제한을 제거하고, USD 계열 전체를 평탄화
+  const usd = Object.entries(units)
     .filter(([k]) => k.toUpperCase().includes('USD'))
     .flatMap(([, arr]) => arr || []);
-  
-  if (all.length === 0) {
-    return Object.values(units).flatMap((arr) => arr || []);
-  }
-  
-  // 최근 5년 이내 데이터만 필터링 (더 엄격하게)
-  const currentYear = new Date().getFullYear();
-  return all.filter(item => {
-    if (!item.end) return false;
-    const endDate = new Date(item.end);
-    const year = endDate.getFullYear();
-    return year >= (currentYear - 5) && year <= currentYear;
-  });
+  if (usd.length) return usd;
+  // USD 없으면 모든 유닛을 평탄화
+  return Object.values(units).flatMap((arr) => arr || []);
 }
 
 // 폼/기간/최근성 매칭 강화: 폼 일치(10-Q/10-K) 우선, 보고기간 근접, 파일링연도 기준 최근 6년 우선
@@ -1170,13 +1218,15 @@ function chooseBestFact(arr: any[], formHint: string, reportDtISO: string | null
   const hint = formHint.replace('/A','');
   const filingYear = filingISO ? new Date(filingISO).getUTCFullYear() : null;
   const reportYear = reportDtISO ? new Date(reportDtISO).getUTCFullYear() : null;
+  const referenceISO = reportDtISO || filingISO || null;
+  const referenceDate = referenceISO ? new Date(referenceISO) : null;
   
   return arr
     .filter(x => typeof x.val === 'number' && x.end)
     .map(x => {
       const endISO = toISODate(x.end);
       const endDate = endISO ? new Date(endISO) : null;
-      const reportDate = reportDtISO ? new Date(reportDtISO) : null;
+      const reportDate = referenceDate;
       const endYear = endDate ? endDate.getUTCFullYear() : 0;
       
       return {
@@ -1184,34 +1234,33 @@ function chooseBestFact(arr: any[], formHint: string, reportDtISO: string | null
         endISO,
         formScore: x.form === hint ? 2 : (x.form?.startsWith('10') ? 1 : 0),
         dist: (reportDate && endDate) ? Math.abs(+reportDate - +endDate) : 9e15,
-        recent: filingYear && endDate ? (Math.abs(endYear - filingYear) <= 6 ? 1 : 0) : 1,
+        recent: filingYear && endDate ? (Math.abs(endYear - filingYear) <= 6 ? 1 : 0) : 0,
         yearScore: endYear,
         // 보고년도와 일치하는지 확인
-        yearMatch: reportYear ? (endYear === reportYear ? 1 : 0) : 0,
-        // 최근 3년 이내인지 확인
-        veryRecent: endYear >= (filingYear ? filingYear - 3 : 2020) ? 1 : 0
+        yearMatch: (reportYear ?? filingYear) ? (endYear === (reportYear ?? filingYear) ? 1 : 0) : 0,
+        // 과도한 최근 편향 제거: veryRecent는 사용하지 않음
+        veryRecent: 0
       };
     })
     .sort((a,b) => {
-      // 1. 보고년도 일치 (가장 중요)
+      // 1) 보고년도 일치 우선
       if (b.yearMatch !== a.yearMatch) return b.yearMatch - a.yearMatch;
-      // 2. 최근 3년 이내
-      if (b.veryRecent !== a.veryRecent) return b.veryRecent - a.veryRecent;
-      // 3. 최근성 (6년 이내)
-      if (b.recent !== a.recent) return b.recent - a.recent;
-      // 4. 폼 일치
+      // 2) 보고기간과의 거리(가까울수록 우선)
+      if (a.dist !== b.dist) return a.dist - b.dist;
+      // 3) 폼 일치
       if (b.formScore !== a.formScore) return b.formScore - a.formScore;
-      // 5. 연도 (최신 우선)
-      if (b.yearScore !== a.yearScore) return b.yearScore - a.yearScore;
-      // 6. 기간 근접성
-      return a.dist - b.dist;
+      // 4) 파일링 연도 ±6년 이내 가산
+      if (b.recent !== a.recent) return b.recent - a.recent;
+      // 5) 연도 (동률 시 최신 우선)
+      return b.yearScore - a.yearScore;
     })[0];
 }
 
 async function parseFactsWithCompanyFacts(raw: RawRecentFiling, _baseUrl: string, ticker?: string, exhibits?: any[]): Promise<any> {
   if (!(raw.form.startsWith('10-K') || raw.form.startsWith('10-Q'))) return {};
+  const filingCik = (raw.sourceCik && String(raw.sourceCik).padStart(10, '0')) || null;
   const t = raw.tickers?.[0] || ticker;
-  const cik = t ? await getCIKFromTicker(t) : null;
+  const cik = filingCik || (t ? await getCIKFromTicker(t) : null);
   const factsAll = cik ? await getCompanyFacts(cik) : null;
   if (!factsAll) return {};
 

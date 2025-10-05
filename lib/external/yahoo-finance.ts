@@ -239,12 +239,16 @@ async function fetchYahooEarningsData(
       try {
         console.log(`Trying Alpha Vantage endpoint: ${alphaVantageUrl.replace(alphaVantageApiKey, '***')}`);
         
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 8000);
         const response = await fetch(alphaVantageUrl, {
           headers: {
             'Accept': 'application/json',
             'User-Agent': 'GPTs-API-Server/1.0'
-          }
+          },
+          signal: controller.signal
         });
+        // no clearTimeout needed for one-shot abort timer
         
         if (!response.ok) {
           console.log(`Endpoint failed with status ${response.status}`);
