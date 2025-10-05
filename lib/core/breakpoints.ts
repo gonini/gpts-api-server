@@ -55,9 +55,9 @@ export function detectBreakpoints(
     const curr = earningsByTs[currentIdx];
     console.log(`[YoY Debug] Computing YoY for ${curr.date}, eps: ${curr.eps}, revenue: ${curr.revenue}`);
     
-    // Find prior ~1 year entry within ±60 days
+    // Find prior ~1 year entry within ±120 days (older data can drift)
     const oneYearMs = 365 * 24 * 3600 * 1000;
-    const windowMs = 60 * 24 * 3600 * 1000;
+    const windowMs = 120 * 24 * 3600 * 1000;
     const targetStart = curr.ts - oneYearMs - windowMs;
     const targetEnd = curr.ts - oneYearMs + windowMs;
     
@@ -75,7 +75,23 @@ export function detectBreakpoints(
     }
     
     if (!prior) {
-      console.log(`[YoY Debug] No prior data found for ${curr.date}`);
+      console.log(`[YoY Debug] No prior data within ±120d for ${curr.date}; trying nearest ~1y fallback`);
+      // Fallback: nearest to 1y gap within 1.5y horizon
+      let bestIdx = -1;
+      let bestDelta = Number.POSITIVE_INFINITY;
+      for (let i = currentIdx - 1; i >= 0; i--) {
+        const gap = Math.abs((curr.ts - earningsByTs[i].ts) - oneYearMs);
+        // stop if older than ~1.5 years away
+        if ((curr.ts - earningsByTs[i].ts) > (oneYearMs + 180 * 24 * 3600 * 1000)) break;
+        if (gap < bestDelta) {
+          bestDelta = gap;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx >= 0) {
+        prior = earningsByTs[bestIdx];
+        console.log(`[YoY Debug] Fallback prior selected: ${prior.date}`);
+      }
     }
 
     const out: { epsYoY?: number; revYoY?: number; flags?: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean } } = {};

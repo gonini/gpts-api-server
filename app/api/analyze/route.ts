@@ -211,19 +211,52 @@ async function handleRequest(request: NextRequest) {
     }
     
     // If no earnings data from Finnhub, try SEC Reports as fallback
-    if (earnings.length === 0) {
-      console.log('No Finnhub earnings data, trying SEC Reports as fallback');
-      try {
-        const secEarnings = await extractEarningsFromSECReports(ticker, from, to);
-        if (secEarnings.length > 0) {
-          earnings = secEarnings;
-          earningsSource = 'sec_reports';
-          console.log(`Found ${secEarnings.length} earnings data points from SEC Reports`);
+    // Merge in SEC-derived earnings to enrich revenue for YoY calc (near-date join)
+    try {
+      const secEarnings = await extractEarningsFromSECReports(ticker, from, to);
+      if (secEarnings.length > 0) {
+        const byDate = new Map<string, { date: string; eps: number | null; revenue: number | null; when?: string }>();
+        for (const e of earnings) byDate.set(e.date, { ...e });
+        const padDays = 45 * 24 * 3600 * 1000; // ±45 days match window
+        const earnList = Array.from(byDate.values()).map(e => ({ ...e, ts: new Date(e.date).getTime() }));
+        for (const s of secEarnings) {
+          const ts = new Date(s.date).getTime();
+          // exact date first
+          const exact = byDate.get(s.date);
+          if (exact) {
+            if (exact.revenue == null && s.revenue != null) exact.revenue = s.revenue;
+            if (exact.eps == null && s.eps != null) exact.eps = s.eps;
+            byDate.set(s.date, exact);
+            continue;
+          }
+          // nearest within ±45d
+          let bestIdx = -1; let bestDelta = Number.POSITIVE_INFINITY;
+          for (let i = 0; i < earnList.length; i++) {
+            const d = Math.abs(earnList[i].ts - ts);
+            if (d <= padDays && d < bestDelta) { bestDelta = d; bestIdx = i; }
+          }
+          if (bestIdx >= 0) {
+            const merged = earnList[bestIdx];
+            if (merged.revenue == null && s.revenue != null) merged.revenue = s.revenue;
+            if (merged.eps == null && s.eps != null) merged.eps = s.eps;
+            byDate.set(merged.date, { date: merged.date, eps: merged.eps ?? null, revenue: merged.revenue ?? null, when: merged.when });
+          } else {
+            // add as new earnings point if it falls inside range
+            if (ts >= new Date(from).getTime() && ts <= new Date(to).getTime()) {
+              byDate.set(s.date, { date: s.date, eps: s.eps ?? null, revenue: s.revenue ?? null, when: s.when });
+            }
+          }
         }
-      } catch (secError) {
-        console.warn('SEC Reports fallback failed:', secError);
+        earnings = Array.from(byDate.values())
+          .map(e => ({
+            date: e.date,
+            when: (e.when === 'bmo' || e.when === 'amc' || e.when === 'dmh') ? (e.when as 'bmo'|'amc'|'dmh') : 'unknown' as const,
+            eps: e.eps ?? null,
+            revenue: e.revenue ?? null,
+          }))
+          .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
       }
-    }
+    } catch {}
     
     // Add earnings source information
     if (earningsSource === 'sec_reports') {
