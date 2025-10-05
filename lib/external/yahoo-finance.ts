@@ -140,20 +140,20 @@ export async function fetchEarnings(
         const alphaData = await fetchYahooEarnings(ticker, from, to);
         if (alphaData && alphaData.length > 0) {
           const merged = mergeEarningsRecords(finnhubData, alphaData);
-          return merged;
+          return filterEarningsByRange(merged, from, to);
         }
       } catch (mergeErr) {
         console.warn(`[Earnings merge] Alpha Vantage fetch failed for ${ticker}:`, mergeErr);
       }
-      return finnhubData;
+      return filterEarningsByRange(finnhubData, from, to);
     } catch (error) {
       console.warn(`[Finnhub] Failed for ${ticker}, falling back to Yahoo Finance:`, error);
-      return fetchYahooEarnings(ticker, from, to);
+      return filterEarningsByRange(await fetchYahooEarnings(ticker, from, to), from, to);
     }
   }
 
   console.log(`[Yahoo] USE_FINNHUB_EARNINGS disabled; falling back to legacy earnings for ${ticker}`);
-  return fetchYahooEarnings(ticker, from, to);
+  return filterEarningsByRange(await fetchYahooEarnings(ticker, from, to), from, to);
 }
 
 /**
@@ -192,6 +192,19 @@ function mergeEarningsRecords(
     (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
   );
   return merged;
+}
+
+function filterEarningsByRange(
+  rows: EarningsRow[],
+  from: string,
+  to: string
+): EarningsRow[] {
+  const fromTs = new Date(from).getTime();
+  const toTs = new Date(to).getTime();
+  return rows.filter(r => {
+    const dt = new Date(r.date).getTime();
+    return !isNaN(dt) && dt >= fromTs && dt <= toTs;
+  });
 }
 
 /**

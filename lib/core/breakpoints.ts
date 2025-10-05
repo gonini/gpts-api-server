@@ -10,8 +10,12 @@ export interface BreakpointMeta {
   ratio: number;
   description: string;
   epsYoY?: number;
+  revYoY?: number;
+  eps?: number | null;
+  revenue?: number | null;
   flags?: {
     eps_yoy_nm?: boolean;
+    rev_yoy_nm?: boolean;
     [key: string]: any;
   };
   [key: string]: any;
@@ -28,22 +32,84 @@ export interface EpsNormalizationMeta {
  */
 export function detectBreakpoints(
   prices: Array<{ date: string; close?: number; adjClose?: number }>,
-  earnings: Array<{ date: string; eps: number | null }>
+  earnings: Array<{ date: string; eps: number | null; revenue?: number | null; when?: string }>
 ): BreakpointMeta[] {
   const breakpoints: BreakpointMeta[] = [];
-  
-  // 1. EPS-based breakpoint detection (earnings announcements)
-  for (const earning of earnings) {
-    if (earning.eps !== null && earning.eps !== undefined) {
-      breakpoints.push({
-        date: earning.date,
-        announceDate: earning.date,
-        when: earning.date,
-        type: 'earnings',
-        ratio: 1.0, // No price ratio for earnings announcements
-        description: `Earnings announcement (EPS: ${earning.eps})`
-      });
+  if (!prices || prices.length === 0) return breakpoints;
+
+  // Prepare helpers
+  const priceStartTs = new Date(prices[0].date).getTime();
+  const priceEndTs = new Date(prices[prices.length - 1].date).getTime();
+
+  const earningsSorted = [...earnings]
+    .filter(e => {
+      const ts = new Date(e.date).getTime();
+      return !isNaN(ts) && ts >= priceStartTs && ts <= priceEndTs;
+    })
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  // Build quick index by time for YoY comparisons
+  const earningsByTs = earningsSorted.map(e => ({ ...e, ts: new Date(e.date).getTime() }));
+
+  function computeYoY(currentIdx: number): { epsYoY?: number; revYoY?: number; flags?: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean } } {
+    const curr = earningsByTs[currentIdx];
+    // Find prior ~1 year entry within ±60 days
+    const oneYearMs = 365 * 24 * 3600 * 1000;
+    const windowMs = 60 * 24 * 3600 * 1000;
+    const targetStart = curr.ts - oneYearMs - windowMs;
+    const targetEnd = curr.ts - oneYearMs + windowMs;
+    let prior: typeof curr | undefined;
+    for (let i = currentIdx - 1; i >= 0; i--) {
+      const ts = earningsByTs[i].ts;
+      if (ts < targetStart) break;
+      if (ts >= targetStart && ts <= targetEnd) { prior = earningsByTs[i]; break; }
     }
+
+    const out: { epsYoY?: number; revYoY?: number; flags?: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean } } = {};
+    const flags: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean } = {};
+
+    if (prior) {
+      // EPS YoY
+      if (typeof curr.eps === 'number' && curr.eps !== null && typeof prior.eps === 'number' && prior.eps !== null) {
+        if (prior.eps === 0) {
+          flags.eps_yoy_nm = true;
+        } else {
+          out.epsYoY = (curr.eps - prior.eps) / Math.abs(prior.eps);
+        }
+      }
+      // Revenue YoY
+      if (typeof curr.revenue === 'number' && curr.revenue !== null && typeof prior.revenue === 'number' && prior.revenue !== null) {
+        if (prior.revenue === 0) {
+          flags.rev_yoy_nm = true;
+        } else {
+          out.revYoY = (curr.revenue - prior.revenue) / Math.abs(prior.revenue);
+        }
+      }
+    }
+
+    if (flags.eps_yoy_nm || flags.rev_yoy_nm) {
+      out.flags = flags;
+    }
+    return out;
+  }
+  
+  // 1. Earnings-based breakpoint detection (announcement days)
+  for (let i = 0; i < earningsByTs.length; i++) {
+    const earning = earningsByTs[i];
+    const yoy = computeYoY(i);
+    breakpoints.push({
+      date: earning.date,
+      announceDate: earning.date,
+      when: (earning.when as string) || earning.date,
+      type: 'earnings',
+      ratio: 1.0,
+      description: `Earnings announcement`,
+      epsYoY: yoy.epsYoY,
+      revYoY: yoy.revYoY,
+      eps: earning.eps ?? null,
+      revenue: earning.revenue ?? null,
+      flags: yoy.flags,
+    });
   }
   
   // 2. Price-based breakpoint detection (stock splits, significant events)
