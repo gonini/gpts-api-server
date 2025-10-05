@@ -127,6 +127,7 @@ describe('SEC EDGAR Historical Data Collection', () => {
       }).filter(Boolean);
 
       const inRange = candidates.filter(candidate => {
+        if (!candidate) return false;
         const candidateDate = new Date(candidate);
         const diff = Math.abs((candidateDate.getTime() - filingDate.getTime()) / 86400000);
         return diff <= 21;
@@ -161,6 +162,7 @@ describe('SEC EDGAR Historical Data Collection', () => {
       }).filter(Boolean);
 
       const inRange = candidates.filter(candidate => {
+        if (!candidate) return false;
         const candidateDate = new Date(candidate);
         const diff = Math.abs((candidateDate.getTime() - filingDate.getTime()) / 86400000);
         return diff <= 21;
@@ -234,7 +236,7 @@ describe('SEC EDGAR Historical Data Collection', () => {
       // Should include press release
       const pressRelease = result.find(e => e.type === 'press_release');
       expect(pressRelease).toBeDefined();
-      expect(pressRelease.title).toBe('Exhibit 99 / Press Release');
+      expect(pressRelease?.title).toBe('Exhibit 99 / Press Release');
 
       // Should include regular exhibits
       const exhibits = result.filter(e => e.type === 'exhibit');

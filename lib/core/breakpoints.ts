@@ -6,7 +6,7 @@ export interface BreakpointMeta {
   date: string;
   announceDate: string;
   when: string;
-  type: 'split' | 'dividend' | 'other';
+  type: 'split' | 'dividend' | 'earnings' | 'other';
   ratio: number;
   description: string;
   epsYoY?: number;
@@ -32,7 +32,21 @@ export function detectBreakpoints(
 ): BreakpointMeta[] {
   const breakpoints: BreakpointMeta[] = [];
   
-  // Simple breakpoint detection based on price gaps
+  // 1. EPS-based breakpoint detection (earnings announcements)
+  for (const earning of earnings) {
+    if (earning.eps !== null && earning.eps !== undefined) {
+      breakpoints.push({
+        date: earning.date,
+        announceDate: earning.date,
+        when: earning.date,
+        type: 'earnings',
+        ratio: 1.0, // No price ratio for earnings announcements
+        description: `Earnings announcement (EPS: ${earning.eps})`
+      });
+    }
+  }
+  
+  // 2. Price-based breakpoint detection (stock splits, significant events)
   for (let i = 1; i < prices.length; i++) {
     const prevPrice = prices[i - 1].close || prices[i - 1].adjClose;
     const currPrice = prices[i].close || prices[i].adjClose;
@@ -42,17 +56,28 @@ export function detectBreakpoints(
     const ratio = currPrice / prevPrice;
     
     // Detect significant price changes (potential stock splits)
-    if (ratio < 0.5 || ratio > 2.0) {
-      breakpoints.push({
-        date: prices[i].date,
-        announceDate: prices[i].date,
-        when: prices[i].date,
-        type: 'split',
-        ratio,
-        description: `Price change: ${(ratio * 100).toFixed(1)}%`
-      });
+    // Adjusted thresholds to be more realistic
+    if (ratio < 0.7 || ratio > 1.5) {
+      // Check if this date already has an earnings breakpoint
+      const existingEarningsBreakpoint = breakpoints.find(
+        bp => bp.date === prices[i].date && bp.type === 'earnings'
+      );
+      
+      if (!existingEarningsBreakpoint) {
+        breakpoints.push({
+          date: prices[i].date,
+          announceDate: prices[i].date,
+          when: prices[i].date,
+          type: 'split',
+          ratio,
+          description: `Price change: ${(ratio * 100).toFixed(1)}%`
+        });
+      }
     }
   }
+  
+  // Sort breakpoints by date
+  breakpoints.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   
   return breakpoints;
 }

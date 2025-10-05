@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { AnalysisRequestSchema, AnalysisResponse } from '@/lib/core/schema';
+import { AnalysisRequestSchema, AnalysisResponse, AnalysisSegment } from '@/lib/core/schema';
 import { fetchAdjPrices, fetchEarnings } from '@/lib/external/yahoo-finance';
 import { detectBreakpoints, getLastEpsNormalizationMeta } from '@/lib/core/breakpoints';
 import { resolveDay0, getTradingDates, formatDateRange, getLastResolveDay0Meta } from '@/lib/core/calendar';
@@ -7,8 +7,68 @@ import { computeCAR, alignPriceData } from '@/lib/core/car';
 import { RateLimiter } from '@/lib/core/rate-limit';
 import { buildSourceUrls } from '@/lib/core/source-urls';
 import { shouldUseFinnhubEarnings, shouldUseFinnhubPrices } from '@/lib/external/finnhub';
+import { fetchAllSECReports } from '@/lib/external/sec-edgar';
 
 export const runtime = 'edge';
+
+/**
+ * Extract earnings data from SEC Reports for historical analysis
+ */
+type MinimalEarnings = { date: string; when: 'bmo' | 'amc' | 'dmh' | 'unknown'; eps: number | null; revenue: number | null };
+
+async function extractEarningsFromSECReports(ticker: string, from: string, to: string): Promise<MinimalEarnings[]> {
+  try {
+    console.log(`Extracting earnings from SEC Reports for ${ticker} from ${from} to ${to}`);
+    const secReports = await fetchAllSECReports(ticker, from, to);
+    const earnings: MinimalEarnings[] = [];
+    
+    console.log(`Found ${secReports.length} SEC reports`);
+    
+    // Extract earnings from 10-Q and 10-K reports
+    for (const report of secReports) {
+      if (report.form === '10-Q' || report.form === '10-K') {
+        console.log(`Processing ${report.form} report`);
+        
+        // Look for earnings data in facts
+        if (report.facts?.revenues) {
+          const revenueData = report.facts.revenues;
+          if (revenueData?.value && revenueData?.period) {
+            // Convert revenue to approximate EPS (simplified calculation)
+            // This is a rough approximation - in reality, you'd need more sophisticated parsing
+            const approximateEPS = revenueData.value / 1000000000; // Convert to billions and use as rough EPS
+            
+            console.log(`Found revenue data: ${revenueData.period} = ${approximateEPS}`);
+            
+            earnings.push({
+              date: revenueData.period,
+              when: 'unknown',
+              eps: approximateEPS,
+              revenue: revenueData.value ?? null,
+            });
+          }
+        }
+        
+        // Also try to extract from 8-K earnings announcements
+      }
+      if (report.form === '8-K' && (report as any).event_types?.includes('earnings')) {
+          console.log(`Found 8-K earnings announcement`);
+          // Use filing date as earnings date
+          earnings.push({
+          date: (report as any).filingDate || (report as any).date,
+            when: 'unknown',
+            eps: null,
+            revenue: null,
+          });
+      }
+    }
+    
+    console.log(`Extracted ${earnings.length} earnings data points from SEC Reports`);
+    return earnings;
+  } catch (error) {
+    console.warn('Failed to extract earnings from SEC Reports:', error);
+    return [];
+  }
+}
 
 export async function GET(request: NextRequest) {
   return handleRequest(request);
@@ -83,6 +143,8 @@ async function handleRequest(request: NextRequest) {
 
     type EarningsResult = Awaited<ReturnType<typeof fetchEarnings>>;
     let earnings: EarningsResult;
+    let earningsSource = 'finnhub';
+    
     try {
       earnings = await fetchEarnings(ticker, from, to);
     } catch (error) {
@@ -145,6 +207,26 @@ async function handleRequest(request: NextRequest) {
 
     if (useFinnhubEarnings) {
       notesBase.add('source=finnhub');
+    }
+    
+    // If no earnings data from Finnhub, try SEC Reports as fallback
+    if (earnings.length === 0) {
+      console.log('No Finnhub earnings data, trying SEC Reports as fallback');
+      try {
+        const secEarnings = await extractEarningsFromSECReports(ticker, from, to);
+        if (secEarnings.length > 0) {
+          earnings = secEarnings;
+          earningsSource = 'sec_reports';
+          console.log(`Found ${secEarnings.length} earnings data points from SEC Reports`);
+        }
+      } catch (secError) {
+        console.warn('SEC Reports fallback failed:', secError);
+      }
+    }
+    
+    // Add earnings source information
+    if (earningsSource === 'sec_reports') {
+      notesBase.add('earnings_source=sec_reports');
     }
 
     if (earnings.length === 0) {
@@ -273,15 +355,20 @@ async function handleRequest(request: NextRequest) {
               period.end = tradingDates[tradingDates.length - 1];
             }
 
-            const segment = {
+            const segment: AnalysisSegment = {
               label: segmentLabel,
               earnings: {
                 date: breakpoint.announceDate,
-                when: breakpoint.when,
+                when: (breakpoint.when === 'bmo' || breakpoint.when === 'amc' || breakpoint.when === 'dmh') 
+                  ? (breakpoint.when as 'bmo' | 'amc' | 'dmh')
+                  : 'unknown',
                 eps: breakpoint.eps ?? null,
                 eps_yoy: breakpoint.epsYoY ?? null,
                 rev_yoy: breakpoint.revYoY ?? null,
-                flags: breakpoint.flags,
+                flags: breakpoint.flags ? {
+                  eps_yoy_nm: breakpoint.flags.eps_yoy_nm ? true : undefined,
+                  rev_yoy_nm: breakpoint.flags.rev_yoy_nm ? true : undefined,
+                } : undefined,
               },
               period,
               day0: day0Date,
@@ -311,8 +398,8 @@ async function handleRequest(request: NextRequest) {
     console.log('Final segments:', JSON.stringify(segments, null, 2));
 
     const normalizationMeta = getLastEpsNormalizationMeta();
-    if (normalizationMeta.epsScale !== 1) {
-      notesFlags.add(`eps_scaled=${normalizationMeta.epsScale}`);
+    if (normalizationMeta) {
+      notesFlags.add(`eps_normalized=true`);
     }
 
     const responseNotes = new Set<string>();

@@ -129,7 +129,23 @@ export async function fetchEarnings(
   if (shouldUseFinnhubEarnings()) {
     try {
       console.log(`[Finnhub] USE_FINNHUB_EARNINGS enabled for ${ticker}`);
-      return await fetchFinnhubEarnings(ticker, from, to);
+      const finnhubData = await fetchFinnhubEarnings(ticker, from, to);
+      // If Finnhub returns no data, fall back to Alpha Vantage (Yahoo path)
+      if (!finnhubData || finnhubData.length === 0) {
+        console.warn(`[Finnhub] Returned empty earnings for ${ticker}. Falling back to Alpha Vantage.`);
+        return fetchYahooEarnings(ticker, from, to);
+      }
+      // Partial coverage merge: fetch Alpha Vantage and fill missing dates
+      try {
+        const alphaData = await fetchYahooEarnings(ticker, from, to);
+        if (alphaData && alphaData.length > 0) {
+          const merged = mergeEarningsRecords(finnhubData, alphaData);
+          return merged;
+        }
+      } catch (mergeErr) {
+        console.warn(`[Earnings merge] Alpha Vantage fetch failed for ${ticker}:`, mergeErr);
+      }
+      return finnhubData;
     } catch (error) {
       console.warn(`[Finnhub] Failed for ${ticker}, falling back to Yahoo Finance:`, error);
       return fetchYahooEarnings(ticker, from, to);
@@ -138,6 +154,44 @@ export async function fetchEarnings(
 
   console.log(`[Yahoo] USE_FINNHUB_EARNINGS disabled; falling back to legacy earnings for ${ticker}`);
   return fetchYahooEarnings(ticker, from, to);
+}
+
+/**
+ * Merge earnings arrays, preferring primary provider (Finnhub) values and
+ * filling missing dates/fields from secondary provider (Alpha Vantage).
+ */
+function mergeEarningsRecords(
+  primary: EarningsRow[],
+  secondary: EarningsRow[]
+): EarningsRow[] {
+  const byDate = new Map<string, EarningsRow>();
+
+  // Seed with secondary provider records
+  for (const rec of secondary) {
+    if (!rec?.date) continue;
+    byDate.set(rec.date, { ...rec });
+  }
+
+  // Overlay with primary provider records (prefer primary values)
+  for (const rec of primary) {
+    if (!rec?.date) continue;
+    const existing = byDate.get(rec.date);
+    if (!existing) {
+      byDate.set(rec.date, { ...rec });
+      continue;
+    }
+    byDate.set(rec.date, {
+      date: rec.date,
+      when: (rec as any).when ?? (existing as any).when ?? 'unknown',
+      eps: rec.eps !== null && rec.eps !== undefined ? rec.eps : existing.eps ?? null,
+      revenue: rec.revenue !== null && rec.revenue !== undefined ? rec.revenue : existing.revenue ?? null,
+    } as EarningsRow);
+  }
+
+  const merged = Array.from(byDate.values()).sort(
+    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+  return merged;
 }
 
 /**
