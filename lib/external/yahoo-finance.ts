@@ -130,6 +130,8 @@ export async function fetchEarnings(
     try {
       console.log(`[Finnhub] USE_FINNHUB_EARNINGS enabled for ${ticker}`);
       const finnhubData = await fetchFinnhubEarnings(ticker, from, to);
+      console.log(`[Finnhub] Raw earnings data for ${ticker}:`, finnhubData.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
+      
       // If Finnhub returns no data, fall back to Alpha Vantage (Yahoo path)
       if (!finnhubData || finnhubData.length === 0) {
         console.warn(`[Finnhub] Returned empty earnings for ${ticker}. Falling back to Alpha Vantage.`);
