@@ -8,6 +8,7 @@ import { RateLimiter } from '@/lib/core/rate-limit';
 import { buildSourceUrls } from '@/lib/core/source-urls';
 import { shouldUseFinnhubEarnings, shouldUseFinnhubPrices } from '@/lib/external/finnhub';
 import { fetchAllSECReports } from '@/lib/external/sec-edgar';
+import { isDebugFlag, debugLog } from '@/lib/core/debug';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -293,10 +294,10 @@ async function handleRequest(request: NextRequest) {
     const tradingDates = getTradingDates(alignedPrices);
 
     // 3. 변곡점 탐지
-    console.log('Earnings data for breakpoint detection:', JSON.stringify(earnings, null, 2));
+    debugLog(isDebugFlag('DEBUG_ANALYZE'), 'Earnings data for breakpoint detection:', JSON.stringify(earnings, null, 2));
     const breakpoints = detectBreakpoints(prices, earnings);
-    console.log('Detected breakpoints:', JSON.stringify(breakpoints, null, 2));
-    console.log(`Total breakpoints detected: ${breakpoints.length}`);
+    debugLog(isDebugFlag('DEBUG_ANALYZE'), 'Detected breakpoints:', JSON.stringify(breakpoints, null, 2));
+    debugLog(isDebugFlag('DEBUG_ANALYZE'), `Total breakpoints detected: ${breakpoints.length}`);
 
     if (breakpoints.length === 0) {
       return NextResponse.json(

@@ -21,6 +21,8 @@ const DEFAULT_UA =
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+// Debug logger (gate noisy logs behind env)
+import { isDebugFlag, debugLog } from '@/lib/core/debug';
 
 function parseUSD(s: string): number | null {
   const m = s.trim().match(/\$?\s*([0-9][0-9,]*\.?[0-9]*)\s*(billion|million|thousand|bn|b|m|mm|k)?/i);
@@ -91,7 +93,6 @@ async function secFetch(
   init: RequestInit = {},
   maxRetry = 5
 ): Promise<Response> {
-  const target = new URL(url);
   const headers: Record<string, string> = {
     'User-Agent': DEFAULT_UA,
     Accept: (init.headers as Record<string, string>)?.['Accept'] || 'application/json',
