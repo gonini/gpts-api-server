@@ -91,13 +91,14 @@ async function secFetch(
   init: RequestInit = {},
   maxRetry = 5
 ): Promise<Response> {
+  const target = new URL(url);
   const headers: Record<string, string> = {
     'User-Agent': DEFAULT_UA,
     Accept: (init.headers as Record<string, string>)?.['Accept'] || 'application/json',
     'Accept-Encoding': 'gzip, deflate',
-    Host: 'data.sec.gov',
     ...(init.headers as Record<string, string>),
   };
+  // Host 헤더는 대상 호스트와 일치해야 하므로 명시적으로 설정하지 않음(fetch가 자동 설정)
 
   let attempt = 0;
   while (true) {
