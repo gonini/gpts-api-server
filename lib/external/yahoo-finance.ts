@@ -37,13 +37,16 @@ function isAlphaIncomeResponse(d: unknown): d is AlphaIncomeStatementResponse {
 async function fetchYahooAdjPrices(
   ticker: string,
   from: string,
-  to: string
+  to: string,
+  opts?: { noCache?: boolean }
 ): Promise<PriceData[]> {
   const cacheKey = `yahoo_prices:${ticker}:${from}:${to}`;
 
-  const cached = await CacheService.get(cacheKey);
-  if (cached) {
-    return JSON.parse(cached);
+  if (!opts?.noCache) {
+    const cached = await CacheService.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
   }
 
   const fromTimestamp = Math.floor(new Date(from).getTime() / 1000);
@@ -87,7 +90,9 @@ async function fetchYahooAdjPrices(
 
   console.log(`Yahoo Finance: Fetched ${prices.length} price records for ${ticker}`);
 
-  await CacheService.setex(cacheKey, 3600, JSON.stringify(prices));
+  if (!opts?.noCache) {
+    await CacheService.setex(cacheKey, 3600, JSON.stringify(prices));
+  }
 
   return prices;
 }
@@ -95,18 +100,19 @@ async function fetchYahooAdjPrices(
 export async function fetchAdjPrices(
   ticker: string,
   from: string,
-  to: string
+  to: string,
+  opts?: { noCache?: boolean }
 ): Promise<PriceData[]> {
   if (shouldUseFinnhubPrices()) {
     try {
-      return await fetchFinnhubPrices(ticker, from, to);
+      return await fetchFinnhubPrices(ticker, from, to, { noCache: opts?.noCache });
     } catch (error) {
       console.warn('[Prices] Finnhub toggle enabled but failed, falling back to Yahoo', error);
-      return fetchYahooAdjPrices(ticker, from, to);
+      return fetchYahooAdjPrices(ticker, from, to, { noCache: opts?.noCache });
     }
   }
 
-  return fetchYahooAdjPrices(ticker, from, to);
+  return fetchYahooAdjPrices(ticker, from, to, { noCache: opts?.noCache });
 }
 
 /**
@@ -123,32 +129,38 @@ export async function fetchSpy(from: string, to: string): Promise<PriceData[]> {
 async function fetchYahooEarnings(
   ticker: string,
   from: string,
-  to: string
+  to: string,
+  opts?: { noCache?: boolean }
 ): Promise<EarningsRow[]> {
   const cacheKey = `yahoo-earnings:${ticker}:${from}:${to}`;
 
-  const cached = await CacheService.get(cacheKey);
-  if (cached) {
-    console.log(`Yahoo Finance: Cache hit for earnings ${ticker}`);
-    return JSON.parse(cached);
+  if (!opts?.noCache) {
+    const cached = await CacheService.get(cacheKey);
+    if (cached) {
+      console.log(`Yahoo Finance: Cache hit for earnings ${ticker}`);
+      return JSON.parse(cached);
+    }
   }
 
   console.log(`Fetching Yahoo Finance earnings data for ${ticker}`);
   const earningsData = await fetchYahooEarningsData(ticker, from, to);
   console.log(`Yahoo Finance: Fetched ${earningsData.length} earnings records for ${ticker}`);
-  await CacheService.setex(cacheKey, 259200, JSON.stringify(earningsData));
+  if (!opts?.noCache) {
+    await CacheService.setex(cacheKey, 259200, JSON.stringify(earningsData));
+  }
   return earningsData;
 }
 
 export async function fetchEarnings(
   ticker: string,
   from: string,
-  to: string
+  to: string,
+  opts?: { noCache?: boolean }
 ): Promise<EarningsRow[]> {
   if (shouldUseFinnhubEarnings()) {
     try {
       console.log(`[Finnhub] USE_FINNHUB_EARNINGS enabled for ${ticker}`);
-      const finnhubData = await fetchFinnhubEarnings(ticker, from, to);
+      const finnhubData = await fetchFinnhubEarnings(ticker, from, to, { noCache: opts?.noCache });
       console.log(`[Finnhub] Raw earnings data for ${ticker}:`, finnhubData.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
       console.log(`[Finnhub] Data quality analysis:`, {
         totalRecords: finnhubData.length,
@@ -160,11 +172,11 @@ export async function fetchEarnings(
       // If Finnhub returns no data, fall back to Alpha Vantage (Yahoo path)
       if (!finnhubData || finnhubData.length === 0) {
         console.warn(`[Finnhub] Returned empty earnings for ${ticker}. Falling back to Alpha Vantage.`);
-        return fetchYahooEarnings(ticker, from, to);
+        return fetchYahooEarnings(ticker, from, to, { noCache: opts?.noCache });
       }
       // Enhanced data merging: fetch Alpha Vantage and fill missing dates
       try {
-        const alphaData = await fetchYahooEarnings(ticker, from, to);
+        const alphaData = await fetchYahooEarnings(ticker, from, to, { noCache: opts?.noCache });
         console.log(`[Data Merge] Alpha Vantage data for ${ticker}:`, alphaData.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
         
         if (alphaData && alphaData.length > 0) {
@@ -178,12 +190,12 @@ export async function fetchEarnings(
       return filterEarningsByRange(finnhubData, from, to);
     } catch (error) {
       console.warn(`[Finnhub] Failed for ${ticker}, falling back to Yahoo Finance:`, error);
-      return filterEarningsByRange(await fetchYahooEarnings(ticker, from, to), from, to);
+      return filterEarningsByRange(await fetchYahooEarnings(ticker, from, to, { noCache: opts?.noCache }), from, to);
     }
   }
 
   console.log(`[Yahoo] USE_FINNHUB_EARNINGS disabled; using Yahoo Finance earnings for ${ticker}`);
-  const yahooData = await fetchYahooEarnings(ticker, from, to);
+  const yahooData = await fetchYahooEarnings(ticker, from, to, { noCache: opts?.noCache });
   console.log(`[Yahoo] Yahoo Finance earnings data for ${ticker}:`, yahooData.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
   return filterEarningsByRange(yahooData, from, to);
 }
