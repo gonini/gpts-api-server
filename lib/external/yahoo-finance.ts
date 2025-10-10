@@ -1,7 +1,7 @@
 import { PriceData, EarningsRow } from '@/lib/core/schema';
 import { mergeEarningsRecords, filterEarningsByRange } from '@/lib/core/earnings-utils';
 import { CacheService } from '@/lib/kv';
-import { fetchRevenueData, getTickerAliasesFromSEC } from '@/lib/external/sec-edgar';
+import { fetchRevenueData, fetchEPSData, getTickerAliasesFromSEC } from '@/lib/external/sec-edgar';
 import { getOfflineAliases, providerNormalizeCandidates, orderAliasesByCutover } from '@/lib/core/symbols';
 import {
   fetchFinnhubEarnings,
@@ -304,6 +304,24 @@ async function fetchYahooEarningsData(
           });
         }
       });
+      // EPS도 companyfacts 기반으로 보강
+      try {
+        console.log(`Fetching SEC EDGAR EPS data for ${ticker}`);
+        const secEPS = await fetchEPSData(ticker, from, to);
+        console.log(`Found ${secEPS.length} SEC EDGAR EPS records`);
+        secEPS.forEach(rec => {
+          const idx = earningsData.findIndex(e => e.date === rec.date);
+          if (idx >= 0) {
+            if (earningsData[idx].eps == null && typeof rec.eps === 'number') {
+              earningsData[idx].eps = rec.eps;
+            }
+          } else {
+            earningsData.push({ date: rec.date, when: 'unknown', eps: rec.eps, revenue: null });
+          }
+        });
+      } catch (e) {
+        console.log(`SEC EDGAR EPS fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     } catch (error) {
       console.log(`SEC EDGAR data fetch failed: ${error instanceof Error ? error.message : String(error)}`);
     }
