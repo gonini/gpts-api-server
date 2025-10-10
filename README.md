@@ -147,40 +147,31 @@ POST /api/analyze - 미국 상장사 실적/주가 반응 분석
     "ticker": "NBR",
     "as_of": "2025-09-28",
     "segments": [
-      {
-        "label": "2024-12-31 EPS YoY 344% Rev YoY -12%",
-        "earnings": {
-          "date": "2024-12-31",
-          "when": "unknown",
-          "eps": -6.67,
-          "eps_yoy": 3.447,
-          "rev_yoy": -0.125
-        },
-        "period": {
-          "start": "2024-12-30",
-          "end": "2025-01-05"
-        },
-        "price_reaction": {
-          "window": "[-1,+5]",
-          "car": 0.0234,
-          "ret_sum": 0.0456,
-          "bench_sum": 0.0222
-        },
-        "source_urls": [
-          "polygon://v2/aggs/ticker/NBR/range/1/day/2023-01-01/2024-12-31",
-          "finnhub://stock/earnings?symbol=NBR"
-        ]
-      }
+      { "label": "…", "earnings": { "date": "…" }, "price_reaction": { "window": "…" } }
     ],
-    "notes": [
-      "price_TTL=60m",
-      "fund_TTL=72h",
-      "assume_AMC_if_unknown",
-      "timestamps=ET; adjustedClose=true"
-    ]
+    "notes": [ "price_TTL=60m", "fund_TTL=72h", "assume_AMC_if_unknown", "timestamps=ET; adjustedClose=true" ]
   }
 }
 ```
+
+#### 분석 방법론 (D0/EPS/CAR)
+
+- 이벤트일(D0) 교정
+  - 1순위: 8-K Item 2.02 + Exhibit 99(Press Release) 내 날짜 추출(파일링 ±21일) → 2순위: period_of_report → 3순위: filed_at
+  - BMO/AMC 판정(ET 기준) 및 주말 스냅 적용, 응답에 `data_quality.event_date_source`, `data_quality.event_date_corrected` 포함
+
+- EPS 표준화
+  - 기준: GAAP 희석 EPS(us-gaap:EarningsPerShareDiluted)
+  - 폴백: NetIncomeLoss / WeightedAverageNumberOfDilutedSharesOutstanding
+  - 전 구간 분할 소급(Yahoo splits) 반영 → `earnings.eps_basis='GAAP_diluted'`, `earnings.split_adjusted=true`
+
+- 시장모형(CAPM 라이트) CAR
+  - 추정창: D0 이전 252거래일, OLS로 alpha/beta 추정
+  - 윈도우: [-1,+5], [-5,+20]의 AR 합으로 CAR 및 t-stat 산출
+  - 응답: `price_reaction.market_model_used=true`, `car_tstat`, `alpha_beta { alpha, beta, n }`
+
+- 라벨/중복
+  - `label_with_window`에 날짜·YoY·CAR 정보 포함, 같은 이벤트의 윈도우가 겹치면 `overlap_flag=true`
 
 ### 5. SEC EDGAR 테스트
 ```
