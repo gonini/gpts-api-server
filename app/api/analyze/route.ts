@@ -214,10 +214,16 @@ async function handleRequest(request: NextRequest) {
     // If no earnings data from Finnhub, try SEC Reports as fallback
     // Merge in SEC-derived earnings to enrich revenue/EPS only when needed and not on Vercel
     const isVercel = !!process.env.VERCEL;
+    const enableSEC = process.env.ANALYZE_SEC_ENRICH === '1' && !isVercel;
     const needEnrich = earnings.length === 0 || earnings.some(e => e.revenue == null || e.eps == null);
-    if (needEnrich && !isVercel) {
+    if (needEnrich && enableSEC) {
       try {
-        const secEarnings = await extractEarningsFromSECReports(ticker, from, to);
+        const timeoutMs = parseInt(process.env.ANALYZE_SEC_TIMEOUT_MS || '2500', 10);
+        const secPromise = extractEarningsFromSECReports(ticker, from, to);
+        const secEarnings: MinimalEarnings[] = await Promise.race([
+          secPromise,
+          new Promise<MinimalEarnings[]>((resolve) => setTimeout(() => resolve([] as MinimalEarnings[]), isNaN(timeoutMs) ? 2500 : timeoutMs))
+        ]);
         if (secEarnings.length > 0) {
           const byDate = new Map<string, { date: string; eps: number | null; revenue: number | null; when?: string }>();
           for (const e of earnings) byDate.set(e.date, { ...e });
