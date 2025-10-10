@@ -503,6 +503,53 @@ export async function fetchRevenueData(
   return rows;
 }
 
+/**
+ * EPS (기본/희석) 추출: companyfacts API 사용, 단위는 USD/share만 채택
+ */
+export async function fetchEPSData(
+  ticker: string,
+  from: string,
+  to: string
+): Promise<Array<{ date: string; eps: number }>> {
+  const cacheKey = `eps:${ticker}:${from}:${to}`;
+  const cached = await CacheService.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+
+  const cik = await getCIKFromTicker(ticker);
+  if (!cik) return [];
+
+  const facts = await getCompanyFacts(cik);
+  const keys = ['EarningsPerShareDiluted', 'EarningsPerShareBasic'];
+  const rows: Array<{ date: string; eps: number }>= [];
+  const fromDt = new Date(from);
+  const toDt = new Date(to);
+
+  for (const key of keys) {
+    const node = facts?.facts?.['us-gaap']?.[key];
+    if (!node?.units) continue;
+    // USD/share 유닛만 고려
+    const unitKey = Object.keys(node.units).find((u) => u.toUpperCase().includes('USD/SHARE'))
+      || Object.keys(node.units).find((u) => u.toUpperCase().includes('USD'))
+      || Object.keys(node.units)[0];
+    const arr = node.units[unitKey] || [];
+    for (const it of arr) {
+      const end = toISODate(it.end);
+      if (!end) continue;
+      const dt = new Date(end);
+      if (dt >= fromDt && dt <= toDt && typeof it.val === 'number') {
+        rows.push({ date: end, eps: it.val });
+      }
+    }
+    if (rows.length) break; // 첫 유효 시리즈 사용
+  }
+
+  // 날짜 정렬 및 중복 제거(최근값 우선)
+  rows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const dedup = rows.filter((x, i, self) => i === self.findIndex(y => y.date === x.date));
+  await CacheService.setex(cacheKey, 86400, JSON.stringify(dedup));
+  return dedup;
+}
+
 // ---------- Ticker aliases (by CIK) ----------
 export async function getTickerAliasesFromSEC(ticker: string): Promise<string[]> {
   try {
