@@ -1,12 +1,31 @@
 import { PriceData, EarningsRow } from '@/lib/core/schema';
+import { mergeEarningsRecords, filterEarningsByRange } from '@/lib/core/earnings-utils';
 import { CacheService } from '@/lib/kv';
-import { fetchRevenueData } from '@/lib/external/sec-edgar';
+import { fetchRevenueData, getTickerAliasesFromSEC } from '@/lib/external/sec-edgar';
+import { getOfflineAliases, providerNormalizeCandidates, orderAliasesByCutover } from '@/lib/core/symbols';
 import {
   fetchFinnhubEarnings,
   fetchFinnhubPrices,
   shouldUseFinnhubEarnings,
   shouldUseFinnhubPrices,
 } from '@/lib/external/finnhub';
+
+// ---------------- Alpha Vantage response types & guards ----------------
+interface AlphaAnnualEarningsItem { fiscalDateEnding?: string; reportedEPS?: string | number | null; }
+interface AlphaQuarterlyEarningsItem { fiscalDateEnding?: string; reportedEPS?: string | number | null; }
+interface AlphaEarningsResponse { annualEarnings?: AlphaAnnualEarningsItem[]; quarterlyEarnings?: AlphaQuarterlyEarningsItem[] }
+
+interface AlphaIncomeQuarter { fiscalDateEnding?: string; totalRevenue?: string | number | null; reportedCurrency?: string }
+interface AlphaIncomeAnnual { fiscalDateEnding?: string; totalRevenue?: string | number | null; reportedCurrency?: string }
+interface AlphaIncomeStatementResponse { quarterlyReports?: AlphaIncomeQuarter[]; annualReports?: AlphaIncomeAnnual[] }
+
+function isPlainObject(x: unknown): x is Record<string, unknown> { return !!x && typeof x === 'object'; }
+function isAlphaEarningsResponse(d: unknown): d is AlphaEarningsResponse {
+  return isPlainObject(d) && ('annualEarnings' in d || 'quarterlyEarnings' in d);
+}
+function isAlphaIncomeResponse(d: unknown): d is AlphaIncomeStatementResponse {
+  return isPlainObject(d) && ('quarterlyReports' in d || 'annualReports' in d);
+}
 
 /**
  * Yahoo Finance에서 주가 데이터를 가져옵니다.
@@ -162,52 +181,7 @@ export async function fetchEarnings(
  * Merge earnings arrays, preferring primary provider (Finnhub) values and
  * filling missing dates/fields from secondary provider (Alpha Vantage).
  */
-function mergeEarningsRecords(
-  primary: EarningsRow[],
-  secondary: EarningsRow[]
-): EarningsRow[] {
-  const byDate = new Map<string, EarningsRow>();
-
-  // Seed with secondary provider records
-  for (const rec of secondary) {
-    if (!rec?.date) continue;
-    byDate.set(rec.date, { ...rec });
-  }
-
-  // Overlay with primary provider records (prefer primary values)
-  for (const rec of primary) {
-    if (!rec?.date) continue;
-    const existing = byDate.get(rec.date);
-    if (!existing) {
-      byDate.set(rec.date, { ...rec });
-      continue;
-    }
-    byDate.set(rec.date, {
-      date: rec.date,
-      when: (rec as any).when ?? (existing as any).when ?? 'unknown',
-      eps: rec.eps !== null && rec.eps !== undefined ? rec.eps : existing.eps ?? null,
-      revenue: rec.revenue !== null && rec.revenue !== undefined ? rec.revenue : existing.revenue ?? null,
-    } as EarningsRow);
-  }
-
-  const merged = Array.from(byDate.values()).sort(
-    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-  );
-  return merged;
-}
-
-function filterEarningsByRange(
-  rows: EarningsRow[],
-  from: string,
-  to: string
-): EarningsRow[] {
-  const fromTs = new Date(from).getTime();
-  const toTs = new Date(to).getTime();
-  return rows.filter(r => {
-    const dt = new Date(r.date).getTime();
-    return !isNaN(dt) && dt >= fromTs && dt <= toTs;
-  });
-}
+// mergeEarningsRecords & filterEarningsByRange moved to core/earnings-utils
 
 /**
  * Alpha Vantage API를 사용하여 실적 데이터를 가져옵니다.
@@ -229,17 +203,30 @@ async function fetchYahooEarningsData(
       return [];
     }
     
-    // Alpha Vantage API 엔드포인트들
-    const alphaVantageEndpoints = [
-      `https://www.alphavantage.co/query?function=EARNINGS&symbol=${ticker}&apikey=${alphaVantageApiKey}`,
-      `https://www.alphavantage.co/query?function=INCOME_STATEMENT&symbol=${ticker}&apikey=${alphaVantageApiKey}`
-    ];
+    // Ticker aliases (company-level) to improve historical coverage (e.g., GOOG/GOOGL)
+    const aliasesSEC = await getTickerAliasesFromSEC(ticker);
+    const aliasesOffline = getOfflineAliases(ticker);
+    const mergedAliases = Array.from(new Set([...aliasesSEC, ...aliasesOffline]));
+    const uniqueAliases = orderAliasesByCutover(ticker, mergedAliases, from, to);
+    // Alpha Vantage API 엔드포인트들 (provider-specific normalization handled by alias list)
+    const alphaVantageEndpoints: string[] = [];
+    for (const sym of uniqueAliases) {
+      const cands = Array.from(new Set(providerNormalizeCandidates(sym, 'alphavantage')));
+      for (const s of cands) {
+        alphaVantageEndpoints.push(
+          `https://www.alphavantage.co/query?function=EARNINGS&symbol=${s}&apikey=${alphaVantageApiKey}`,
+          `https://www.alphavantage.co/query?function=INCOME_STATEMENT&symbol=${s}&apikey=${alphaVantageApiKey}`
+        );
+      }
+    }
     
     let earningsData: EarningsRow[] = [];
     
     for (const alphaVantageUrl of alphaVantageEndpoints) {
       try {
-        console.log(`Trying Alpha Vantage endpoint: ${alphaVantageUrl.replace(alphaVantageApiKey, '***')}`);
+        if (process.env.DEBUG_ANALYZE === '1' || process.env.DEBUG_LOGS === '1') {
+          console.log(`Trying Alpha Vantage endpoint: ${alphaVantageUrl.replace(alphaVantageApiKey, '***')}`);
+        }
         
         const controller = new AbortController();
         setTimeout(() => controller.abort(), 8000);
@@ -257,18 +244,28 @@ async function fetchYahooEarningsData(
           continue;
         }
         
-        const data = await response.json();
-        console.log(`Alpha Vantage response structure:`, Object.keys(data));
+        const data: unknown = await response.json();
+        if (!isPlainObject(data)) {
+          console.log('Alpha Vantage response not an object, skipping');
+          continue;
+        }
+        if (process.env.DEBUG_ANALYZE === '1' || process.env.DEBUG_LOGS === '1') {
+          console.log(`Alpha Vantage response structure:`, Object.keys(data as Record<string, unknown>));
+        }
         
         // Alpha Vantage 데이터 파싱 시도
         const parsedData = parseAlphaVantageData(data, ticker, from, to);
         if (parsedData.length > 0) {
-          console.log(`Found ${parsedData.length} earnings records from Alpha Vantage`);
+          if (process.env.DEBUG_ANALYZE === '1' || process.env.DEBUG_LOGS === '1') {
+            console.log(`Found ${parsedData.length} earnings records from Alpha Vantage`);
+          }
           earningsData = [...earningsData, ...parsedData];
         }
         
       } catch (error) {
-        console.log(`Endpoint failed: ${error instanceof Error ? error.message : String(error)}`);
+        if (process.env.DEBUG_ANALYZE === '1' || process.env.DEBUG_LOGS === '1') {
+          console.log(`Endpoint failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
         continue;
       }
     }
@@ -318,7 +315,7 @@ async function fetchYahooEarningsData(
  * Alpha Vantage API 응답 데이터를 파싱합니다.
  */
 function parseAlphaVantageData(
-  data: any,
+  data: unknown,
   ticker: string,
   from: string,
   to: string
@@ -327,10 +324,11 @@ function parseAlphaVantageData(
   
   try {
     console.log(`Parsing Alpha Vantage data for ${ticker}`);
-    console.log(`Alpha Vantage data structure:`, Object.keys(data));
+    if (!isPlainObject(data)) return earningsData;
+    console.log(`Alpha Vantage data structure:`, Object.keys(data as Record<string, unknown>));
     
     // Alpha Vantage EARNINGS API 응답 구조 확인
-    if (data.annualEarnings && Array.isArray(data.annualEarnings)) {
+    if (isAlphaEarningsResponse(data) && data.annualEarnings && Array.isArray(data.annualEarnings)) {
       console.log(`Found ${data.annualEarnings.length} annual earnings entries`);
       
       data.annualEarnings.forEach((earning: any, index: number) => {
@@ -372,7 +370,7 @@ function parseAlphaVantageData(
     }
     
     // Alpha Vantage QUARTERLY_EARNINGS API 응답 구조 확인
-    if (data.quarterlyEarnings && Array.isArray(data.quarterlyEarnings)) {
+    if (isAlphaEarningsResponse(data) && data.quarterlyEarnings && Array.isArray(data.quarterlyEarnings)) {
       console.log(`Found ${data.quarterlyEarnings.length} quarterly earnings entries`);
       
       data.quarterlyEarnings.forEach((earning: any, index: number) => {
@@ -410,7 +408,7 @@ function parseAlphaVantageData(
     }
     
     // Alpha Vantage INCOME_STATEMENT API 응답 구조 확인
-    if (data.annualReports && Array.isArray(data.annualReports)) {
+    if (isAlphaIncomeResponse(data) && data.annualReports && Array.isArray(data.annualReports)) {
       console.log(`Found ${data.annualReports.length} annual income statements`);
       
       data.annualReports.forEach((report: any, index: number) => {
@@ -451,6 +449,80 @@ function parseAlphaVantageData(
   } catch (error) {
     console.error(`Error parsing Alpha Vantage data for ${ticker}:`, error instanceof Error ? error.message : String(error));
     return [];
+  }
+
+  // Alpha Vantage INCOME_STATEMENT quarterlyReports (분기 매출) 파싱 및 근접 병합
+  try {
+    if (isAlphaIncomeResponse(data) && (data as AlphaIncomeStatementResponse).quarterlyReports && Array.isArray((data as AlphaIncomeStatementResponse).quarterlyReports)) {
+      const quarterly: Array<{ date: string; revenue: number | null }> = [];
+
+      (data as AlphaIncomeStatementResponse).quarterlyReports!.forEach((report: AlphaIncomeQuarter) => {
+        let date = report.fiscalDateEnding;
+        if (date && typeof date === 'string' && date.includes('T')) {
+          date = date.split('T')[0];
+        }
+        let revenue: number | null = null;
+        if (report.totalRevenue !== undefined && report.totalRevenue !== null && report.totalRevenue !== 'None') {
+          const parsed = parseFloat(String(report.totalRevenue).replace(/,/g, ''));
+          if (!isNaN(parsed)) revenue = parsed;
+        }
+        if (date && revenue !== null) {
+          const d = new Date(date);
+          if (!isNaN(d.getTime())) {
+            quarterly.push({ date, revenue });
+          }
+        }
+      });
+
+      if (quarterly.length) {
+        // 기존 EPS 레코드와 근접 병합(±75일)
+        const padMs = 75 * 24 * 3600 * 1000;
+        const byDate = new Map<string, EarningsRow>();
+        for (const e of earningsData) {
+          if (e?.date) byDate.set(e.date, e);
+        }
+
+        const epsList = earningsData
+          .filter(e => e.eps !== null && e.date)
+          .map(e => ({ ...e, ts: new Date(e.date).getTime() }))
+          .filter(x => !isNaN(x.ts));
+
+        for (const q of quarterly) {
+          const qts = new Date(q.date).getTime();
+          if (isNaN(qts)) continue;
+          // 정확한 날짜 우선
+          if (byDate.has(q.date)) {
+            const ex = byDate.get(q.date)!;
+            const updated: EarningsRow = { date: ex.date, when: ex.when, eps: ex.eps, revenue: (ex.revenue ?? q.revenue) };
+            byDate.set(q.date, updated);
+            continue;
+          }
+          // EPS 근접 병합
+          let bestIdx = -1; let bestDelta = Number.POSITIVE_INFINITY;
+          for (let i = 0; i < epsList.length; i++) {
+            const d = Math.abs(epsList[i].ts - qts);
+            if (d <= padMs && d < bestDelta) { bestDelta = d; bestIdx = i; }
+          }
+          if (bestIdx >= 0) {
+            const target = epsList[bestIdx];
+            const updated: EarningsRow = { date: target.date, when: target.when, eps: target.eps, revenue: target.revenue ?? q.revenue };
+            byDate.set(target.date, updated);
+          } else {
+            // 근접 EPS가 없으면 revenue-only 레코드 추가
+            if (!byDate.has(q.date)) {
+              byDate.set(q.date, { date: q.date, when: 'unknown', eps: null, revenue: q.revenue });
+            }
+          }
+        }
+
+        // earningsData를 병합 결과로 교체(날짜 정렬)
+        const merged = Array.from(byDate.values()).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        earningsData.length = 0;
+        earningsData.push(...merged);
+      }
+    }
+  } catch (err: any) {
+    console.log(`Alpha Vantage quarterlyReports merge failed: ${err?.message ?? String(err)}`);
   }
 }
 
