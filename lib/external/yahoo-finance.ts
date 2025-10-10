@@ -150,17 +150,26 @@ export async function fetchEarnings(
       console.log(`[Finnhub] USE_FINNHUB_EARNINGS enabled for ${ticker}`);
       const finnhubData = await fetchFinnhubEarnings(ticker, from, to);
       console.log(`[Finnhub] Raw earnings data for ${ticker}:`, finnhubData.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
+      console.log(`[Finnhub] Data quality analysis:`, {
+        totalRecords: finnhubData.length,
+        recordsWithEps: finnhubData.filter(e => e.eps !== null).length,
+        recordsWithRevenue: finnhubData.filter(e => e.revenue !== null).length,
+        dateRange: finnhubData.length > 0 ? `${finnhubData[0].date} to ${finnhubData[finnhubData.length-1].date}` : 'no data'
+      });
       
       // If Finnhub returns no data, fall back to Alpha Vantage (Yahoo path)
       if (!finnhubData || finnhubData.length === 0) {
         console.warn(`[Finnhub] Returned empty earnings for ${ticker}. Falling back to Alpha Vantage.`);
         return fetchYahooEarnings(ticker, from, to);
       }
-      // Partial coverage merge: fetch Alpha Vantage and fill missing dates
+      // Enhanced data merging: fetch Alpha Vantage and fill missing dates
       try {
         const alphaData = await fetchYahooEarnings(ticker, from, to);
+        console.log(`[Data Merge] Alpha Vantage data for ${ticker}:`, alphaData.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
+        
         if (alphaData && alphaData.length > 0) {
           const merged = mergeEarningsRecords(finnhubData, alphaData);
+          console.log(`[Data Merge] Merged data for ${ticker}:`, merged.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
           return filterEarningsByRange(merged, from, to);
         }
       } catch (mergeErr) {
