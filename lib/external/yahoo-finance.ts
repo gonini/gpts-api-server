@@ -180,7 +180,38 @@ export async function fetchEarnings(
         console.log(`[Data Merge] Alpha Vantage data for ${ticker}:`, alphaData.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
         
         if (alphaData && alphaData.length > 0) {
-          const merged = mergeEarningsRecords(finnhubData, alphaData);
+          // First, attempt exact-date merge (same as before)
+          let merged = mergeEarningsRecords(finnhubData, alphaData);
+          // Proximity merge: fill missing EPS/Revenue on Finnhub dates using nearest Alpha dates within ±60 days
+          try {
+            const padMs = 60 * 24 * 3600 * 1000;
+            const alphaList = alphaData
+              .filter(e => e.date)
+              .map(e => ({ ...e, ts: new Date(e.date).getTime() }))
+              .filter(x => !isNaN(x.ts));
+            merged = merged.map(row => {
+              if ((row.eps != null && row.revenue != null) || !row.date) return row;
+              const t = new Date(row.date).getTime();
+              if (isNaN(t)) return row;
+              let bestIdx = -1; let bestDelta = Number.POSITIVE_INFINITY;
+              for (let i = 0; i < alphaList.length; i++) {
+                const d = Math.abs(alphaList[i].ts - t);
+                if (d <= padMs && d < bestDelta) { bestDelta = d; bestIdx = i; }
+              }
+              if (bestIdx >= 0) {
+                const a = alphaList[bestIdx];
+                return {
+                  date: row.date,
+                  when: row.when,
+                  eps: row.eps ?? a.eps ?? null,
+                  revenue: row.revenue ?? a.revenue ?? null,
+                } as EarningsRow;
+              }
+              return row;
+            });
+          } catch (e) {
+            console.log(`[Data Merge] Proximity merge skipped: ${e instanceof Error ? e.message : String(e)}`);
+          }
           console.log(`[Data Merge] Merged data for ${ticker}:`, merged.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
           return filterEarningsByRange(merged, from, to);
         }
