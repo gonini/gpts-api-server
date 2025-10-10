@@ -5,11 +5,14 @@ import { getOfflineAliases, orderAliasesByCutover } from '@/lib/core/symbols';
 import { getTickerAliasesFromSEC } from '@/lib/external/sec-edgar';
 import { detectBreakpoints, getLastEpsNormalizationMeta } from '@/lib/core/breakpoints';
 import { resolveDay0, getTradingDates, formatDateRange, getLastResolveDay0Meta } from '@/lib/core/calendar';
-import { computeCAR, alignPriceData } from '@/lib/core/car';
+import { computeCAR, alignPriceData, computeMarketModelCAR } from '@/lib/core/car';
 import { RateLimiter } from '@/lib/core/rate-limit';
 import { buildSourceUrls } from '@/lib/core/source-urls';
 import { shouldUseFinnhubEarnings, shouldUseFinnhubPrices } from '@/lib/external/finnhub';
-import { fetchAllSECReports } from '@/lib/external/sec-edgar';
+import { resolveEarningsEventDate } from '@/lib/adapters/sec-edgar';
+import { normalizeGAAPDilutedEPS } from '@/lib/core/earnings-normalize';
+import { buildLabelWithWindow, rangesOverlap } from '@/lib/core/labels';
+import { fetchAllSECReports, fetchRevenueData } from '@/lib/external/sec-edgar';
 import { isDebugFlag, debugLog } from '@/lib/core/debug';
 
 export const runtime = 'nodejs';
@@ -28,7 +31,7 @@ async function extractEarningsFromSECReports(ticker: string, from: string, to: s
     
     console.log(`Found ${secReports.length} SEC reports`);
     
-    // Extract earnings from 10-Q and 10-K reports
+    // Extract revenues from 10-Q and 10-K reports (no EPS approximation)
     for (const report of secReports) {
       if (report.form === '10-Q' || report.form === '10-K') {
         console.log(`Processing ${report.form} report`);
@@ -37,16 +40,13 @@ async function extractEarningsFromSECReports(ticker: string, from: string, to: s
         if (report.facts?.revenues) {
           const revenueData = report.facts.revenues;
           if (revenueData?.value && revenueData?.period) {
-            // Convert revenue to approximate EPS (simplified calculation)
-            // This is a rough approximation - in reality, you'd need more sophisticated parsing
-            const approximateEPS = revenueData.value / 1000000000; // Convert to billions and use as rough EPS
-            
-            console.log(`Found revenue data: ${revenueData.period} = ${approximateEPS}`);
-            
+            console.log(`Found revenue data: ${revenueData.period} = ${revenueData.value}`);
+            const eventISO = report.event_date || report.period_of_report || (report.filed_at ? report.filed_at.slice(0,10) : null);
+            if (!eventISO) continue;
             earnings.push({
-              date: revenueData.period,
+              date: eventISO,
               when: 'unknown',
-              eps: approximateEPS,
+              eps: null,
               revenue: revenueData.value ?? null,
             });
           }
@@ -56,9 +56,11 @@ async function extractEarningsFromSECReports(ticker: string, from: string, to: s
       }
       if (report.form === '8-K' && (report as any).event_types?.includes('earnings')) {
           console.log(`Found 8-K earnings announcement`);
-          // Use filing date as earnings date
+          // Use event_date (preferred) or filing date as earnings date
+          const eventISO = report.event_date || report.period_of_report || (report.filed_at ? report.filed_at.slice(0,10) : null);
+          if (!eventISO) continue;
           earnings.push({
-          date: (report as any).filingDate || (report as any).date,
+          date: eventISO,
             when: 'unknown',
             eps: null,
             revenue: null,
@@ -331,6 +333,23 @@ async function handleRequest(request: NextRequest) {
         }
       } catch {}
     }
+
+    // Backfill revenue from XBRL companyfacts when missing
+    try {
+      const revSeries = await fetchRevenueData(ticker, extendedFrom, to);
+      if (revSeries.length) {
+        const byDate = new Map(earnings.map(e => [e.date, e]));
+        for (const r of revSeries) {
+          const ex = byDate.get(r.date);
+          if (ex && (ex.revenue == null)) {
+            ex.revenue = r.revenue;
+          }
+        }
+        earnings = Array.from(byDate.values()).sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      }
+    } catch (e) {
+      console.log(`[Revenue backfill] skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
     
     // Add earnings source information
     if (earningsSource === 'sec_reports') {
@@ -362,7 +381,16 @@ async function handleRequest(request: NextRequest) {
     const { prices: alignedPrices, bench: alignedBench } = alignPriceData(prices, bench);
     const tradingDates = getTradingDates(alignedPrices);
 
-    // 3. 변곡점 탐지
+    // 3. EPS 표준화(회사facts + 분할 소급) 시도
+    try {
+      const normalized = await normalizeGAAPDilutedEPS(ticker, extendedFrom, to, earnings.map(e => ({ date: e.date, eps: e.eps })));
+      const normMap = new Map(normalized.map(x => [x.date, x.eps]));
+      earnings = earnings.map(e => ({ ...e, eps: (normMap.get(e.date) ?? e.eps) }));
+    } catch (e) {
+      console.warn(`[EPS Normalize] skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // 4. 변곡점 탐지 (이벤트일 교정 시도)
     debugLog(isDebugFlag('DEBUG_ANALYZE'), 'Earnings data for breakpoint detection:', JSON.stringify(earnings, null, 2));
     const breakpoints = detectBreakpoints(prices, earnings);
     debugLog(isDebugFlag('DEBUG_ANALYZE'), 'Detected breakpoints:', JSON.stringify(breakpoints, null, 2));
@@ -388,15 +416,33 @@ async function handleRequest(request: NextRequest) {
       );
     }
 
-    // 4. 각 변곡점에 대해 CAR 계산
+    // 5. 각 변곡점에 대해 CAR 계산
     const segments: AnalysisResponse['segments'] = [];
     const notesFlags = new Set<string>();
 
     for (const breakpoint of breakpoints) {
       try {
-        // Day0 계산
+        // 이벤트일 교정: 8-K Exhibit 99 → filed_at → period_of_report
+        let correctedDateISO = breakpoint.announceDate;
+        let correctedWhen = breakpoint.when;
+        let eventDateSource: '8-K_ex99'|'filed_at'|'period_of_report' = 'filed_at';
+        let eventDateCorrected = false;
+
+        try {
+          const quarterEndISO = breakpoint.announceDate; // 근사치: 분기말 기반 교정을 위해 필요 시 개선
+          const resolved = await resolveEarningsEventDate({ ticker, quarterEnd: quarterEndISO });
+          const iso = new Date(resolved.eventDateET).toISOString().slice(0,10);
+          if (iso && iso !== correctedDateISO) {
+            correctedDateISO = iso;
+            eventDateCorrected = true;
+          }
+          if (resolved.when === 'bmo' || resolved.when === 'amc') correctedWhen = resolved.when;
+          eventDateSource = resolved.source;
+        } catch {}
+
+        // Day0 계산 (교정값 반영)
         console.log(`Processing breakpoint: ${breakpoint.announceDate}`);
-        const day0Idx = resolveDay0(breakpoint.announceDate, breakpoint.when, tradingDates);
+        const day0Idx = resolveDay0(correctedDateISO, correctedWhen, tradingDates);
         console.log(`Day0 index for ${breakpoint.announceDate}: ${day0Idx}`);
 
         const day0Meta = getLastResolveDay0Meta();
@@ -423,7 +469,8 @@ async function handleRequest(request: NextRequest) {
         for (const { window, label } of windows) {
           try {
             console.log(`Computing CAR for ${breakpoint.announceDate} window ${label} (Day0: ${day0Idx})`);
-            const carResult = computeCAR(alignedPrices, alignedBench, day0Idx, window);
+            const carMM = computeMarketModelCAR(alignedPrices, alignedBench, day0Idx, window);
+            const carResult = carMM; // back-compat fields align
             console.log(`CAR result for ${label}:`, carResult);
 
             const priceReactionFlags: { partial?: true; short_window?: true } = {};
@@ -463,14 +510,25 @@ async function handleRequest(request: NextRequest) {
               period.end = tradingDates[tradingDates.length - 1];
             }
 
+            const label_with_window = buildLabelWithWindow(
+              correctedDateISO,
+              (typeof breakpoint.epsYoY === 'number') ? breakpoint.epsYoY : null,
+              (typeof breakpoint.revYoY === 'number') ? breakpoint.revYoY : null,
+              label,
+              carResult.car
+            );
+
             const segment: AnalysisSegment = {
               label: segmentLabel,
+              label_with_window,
               earnings: {
-                date: breakpoint.announceDate,
-                when: (breakpoint.when === 'bmo' || breakpoint.when === 'amc' || breakpoint.when === 'dmh') 
-                  ? (breakpoint.when as 'bmo' | 'amc' | 'dmh')
+                date: correctedDateISO,
+                when: (correctedWhen === 'bmo' || correctedWhen === 'amc' || correctedWhen === 'dmh') 
+                  ? (correctedWhen as 'bmo' | 'amc' | 'dmh')
                   : 'unknown',
                 eps: breakpoint.eps ?? null,
+                eps_basis: 'GAAP_diluted',
+                split_adjusted: true,
                 // Use computed values only; if unavailable or NM, leave null and signal via flags
                 eps_yoy: (typeof breakpoint.epsYoY === 'number') ? breakpoint.epsYoY : null,
                 rev_yoy: (typeof breakpoint.revYoY === 'number') ? breakpoint.revYoY : null,
@@ -487,9 +545,15 @@ async function handleRequest(request: NextRequest) {
                 ret_sum: carResult.ret_sum,
                 bench_sum: carResult.bench_sum,
                 window_days: carResult.__windowDays,
+                car_tstat: carMM.car_tstat,
+                market_model_used: true,
+                alpha_beta: carMM.alpha_beta,
                 flags: Object.keys(priceReactionFlags).length ? priceReactionFlags : undefined,
               },
               source_urls: buildSourceUrls(ticker, benchTicker, from, to, priceProviderLabel),
+              // 품질 메타 추가
+              // @ts-ignore - schema 확장 전 임시 주입; 이후 타입 갱신 시 제거
+              data_quality: { event_date_source: eventDateSource, event_date_corrected: eventDateCorrected }
             };
 
             segments.push(segment);
@@ -522,6 +586,22 @@ async function handleRequest(request: NextRequest) {
       const t = new Date(originalTo).getTime();
       return !isNaN(d) && d >= f && d <= t;
     });
+
+    // overlap flagging between windows for the same event date
+    for (let i = 0; i < segments.length; i++) {
+      for (let j = i + 1; j < segments.length; j++) {
+        try {
+          const a = segments[i];
+          const b = segments[j];
+          if (a.earnings.date === b.earnings.date) {
+            if (rangesOverlap(a.period.start, a.period.end, b.period.start, b.period.end)) {
+              segments[i].overlap_flag = true;
+              segments[j].overlap_flag = true;
+            }
+          }
+        } catch {}
+      }
+    }
 
     const response: AnalysisResponse = {
       ticker,
