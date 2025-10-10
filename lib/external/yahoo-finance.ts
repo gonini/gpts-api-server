@@ -116,6 +116,65 @@ export async function fetchAdjPrices(
 }
 
 /**
+ * Yahoo Finance splits fetcher via v8 chart events
+ */
+export type SplitEvent = { date: string; ratio: number };
+
+export async function fetchSplits(
+  ticker: string,
+  from: string,
+  to: string
+): Promise<SplitEvent[]> {
+  try {
+    const fromTimestamp = Math.floor(new Date(from).getTime() / 1000);
+    const toTimestamp = Math.floor(new Date(to).getTime() / 1000);
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${fromTimestamp}&period2=${toTimestamp}&interval=1d&includePrePost=true&events=split`;
+
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache'
+      }
+    });
+    if (!response.ok) {
+      console.warn(`[Splits] HTTP ${response.status}: ${response.statusText}`);
+      return [];
+    }
+    const data = await response.json();
+    const result = data?.chart?.result?.[0];
+    const events = result?.events?.splits || {};
+    const out: SplitEvent[] = [];
+
+    for (const key of Object.keys(events)) {
+      const ev = events[key];
+      // Possible shapes: { date: 1657833600, numerator: 20, denominator: 1, splitRatio: '20/1' }
+      let ts: number | null = null;
+      if (typeof ev?.date === 'number') ts = ev.date * 1000;
+      const iso = ts ? new Date(ts).toISOString().split('T')[0] : null;
+
+      let ratio = 1;
+      if (typeof ev?.numerator === 'number' && typeof ev?.denominator === 'number' && ev.denominator !== 0) {
+        ratio = ev.numerator / ev.denominator;
+      } else if (typeof ev?.splitRatio === 'string' && /\d+\s*\/\s*\d+/.test(ev.splitRatio)) {
+        const [num, den] = ev.splitRatio.split('/').map((x: string) => parseFloat(x.trim()));
+        if (den && !isNaN(num) && !isNaN(den) && den !== 0) ratio = num / den;
+      }
+
+      if (iso && ratio && ratio > 0) out.push({ date: iso, ratio });
+    }
+
+    // sort ascending by date
+    out.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    return out;
+  } catch (e) {
+    console.warn(`[Splits] fetch failed for ${ticker}: ${e instanceof Error ? e.message : String(e)}`);
+    return [];
+  }
+}
+
+/**
  * Yahoo Finance에서 SPY 벤치마크 데이터를 가져옵니다.
  */
 export async function fetchSpy(from: string, to: string): Promise<PriceData[]> {

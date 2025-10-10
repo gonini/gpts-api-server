@@ -33,7 +33,7 @@ function parseUSD(s: string): number | null {
   return Math.round(num * mul);
 }
 
-function extractHourFlag(text: string): 'amc'|'bmo'|'dmt'|null {
+export function extractHourFlag(text: string): 'amc'|'bmo'|'dmt'|null {
   const t = text.toLowerCase();
   if (/after (the )?market (close|closes)/i.test(t) || /\bafter-hours?\b/i.test(t)) return 'amc';
   if (/before (the )?market (open|opens)/i.test(t) || /\bpre-market\b/i.test(t)) return 'bmo';
@@ -102,6 +102,16 @@ async function secFetch(
   // Host 헤더는 대상 호스트와 일치해야 하므로 명시적으로 설정하지 않음(fetch가 자동 설정)
 
   let attempt = 0;
+  // global 429 block
+  try {
+    const blockedUntilStr = await CacheService.get('sec:block:until');
+    if (blockedUntilStr) {
+      const until = parseInt(blockedUntilStr, 10);
+      if (!isNaN(until) && Date.now() < until) {
+        throw new Error('SEC_BLOCKED');
+      }
+    }
+  } catch {}
   while (true) {
     // 아주 간단한 rate-limit (~2rps)
     await sleep(600);
@@ -109,6 +119,10 @@ async function secFetch(
     if (res.ok) return res;
 
     if ((res.status === 429 || res.status === 403) && attempt < maxRetry) {
+      // set global block for 10 minutes to avoid hammering
+      try {
+        await CacheService.setex('sec:block:until', 600, String(Date.now() + 600000));
+      } catch {}
       const backoff = Math.min(2000 * 2 ** attempt, 15000);
       await sleep(backoff + Math.floor(Math.random() * 300));
       attempt++;
@@ -472,7 +486,8 @@ export async function fetchRevenueData(
   const cached = await CacheService.get(cacheKey);
   if (cached) return JSON.parse(cached);
 
-  const cik = await getCIKFromTicker(ticker);
+  const localCik = getCIKForTicker(ticker);
+  const cik = localCik || await getCIKFromTicker(ticker);
   if (!cik) return [];
 
   const facts = await getCompanyFacts(cik);
@@ -515,7 +530,8 @@ export async function fetchEPSData(
   const cached = await CacheService.get(cacheKey);
   if (cached) return JSON.parse(cached);
 
-  const cik = await getCIKFromTicker(ticker);
+  const localCik = getCIKForTicker(ticker);
+  const cik = localCik || await getCIKFromTicker(ticker);
   if (!cik) return [];
 
   const facts = await getCompanyFacts(cik);
@@ -548,6 +564,73 @@ export async function fetchEPSData(
   const dedup = rows.filter((x, i, self) => i === self.findIndex(y => y.date === x.date));
   await CacheService.setex(cacheKey, 86400, JSON.stringify(dedup));
   return dedup;
+}
+
+/**
+ * EPS Fallback via ratio: NetIncomeLoss / WeightedAverageNumberOfDilutedSharesOutstanding
+ */
+export async function fetchEPSFallbackFromRatio(
+  ticker: string,
+  from: string,
+  to: string
+): Promise<Array<{ date: string; eps: number }>> {
+  try {
+    const cik = await getCIKFromTicker(ticker);
+    if (!cik) return [];
+    const facts = await getCompanyFacts(cik);
+    if (!facts) return [];
+
+    const fromDt = new Date(from);
+    const toDt = new Date(to);
+
+    const getNode = (key: string) => facts?.facts?.['us-gaap']?.[key];
+    const sharesNode = getNode('WeightedAverageNumberOfDilutedSharesOutstanding');
+    const niNode = getNode('NetIncomeLoss');
+    if (!sharesNode?.units || !niNode?.units) return [];
+
+    const flatten = (units: Record<string, any[]>, pickKeyHint: (k: string) => boolean) => {
+      const keys = Object.keys(units).filter(pickKeyHint);
+      const chosen = keys.length ? keys : Object.keys(units);
+      return chosen.flatMap(k => units[k] || []);
+    };
+
+    // shares: prefer 'shares' units; net income: prefer USD
+    const sharesArr = flatten(sharesNode.units, k => k.toLowerCase().includes('share'));
+    const niArr = flatten(niNode.units, k => k.toUpperCase().includes('USD'));
+
+    // Index net income by end date
+    const niByEnd = new Map<string, number>();
+    for (const it of niArr) {
+      const end = toISODate(it.end);
+      if (!end) continue;
+      const dt = new Date(end);
+      if (isNaN(dt.getTime()) || dt < fromDt || dt > toDt) continue;
+      if (typeof it.val === 'number') {
+        niByEnd.set(end, it.val);
+      }
+    }
+
+    const out: Array<{ date: string; eps: number }> = [];
+    for (const it of sharesArr) {
+      const end = toISODate(it.end);
+      if (!end) continue;
+      const dt = new Date(end);
+      if (isNaN(dt.getTime()) || dt < fromDt || dt > toDt) continue;
+      const shares = typeof it.val === 'number' ? it.val : null;
+      const ni = end ? niByEnd.get(end) : undefined;
+      if (shares && shares !== 0 && typeof ni === 'number') {
+        const eps = ni / shares;
+        if (isFinite(eps)) out.push({ date: end, eps });
+      }
+    }
+
+    out.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    // deduplicate by date keeping first
+    return out.filter((x, i, self) => i === self.findIndex(y => y.date === x.date));
+  } catch (e) {
+    console.warn(`[SEC] EPS fallback ratio failed for ${ticker}: ${e instanceof Error ? e.message : String(e)}`);
+    return [];
+  }
 }
 
 // ---------- Ticker aliases (by CIK) ----------
