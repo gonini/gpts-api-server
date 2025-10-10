@@ -54,7 +54,9 @@ export function detectBreakpoints(
 
   function computeYoY(currentIdx: number): { epsYoY?: number; revYoY?: number; flags?: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean } } {
     const curr = earningsByTs[currentIdx];
-    debugLog(isDebugFlag('DEBUG_ANALYZE'), `[YoY Debug] Computing YoY for ${curr.date}, eps: ${curr.eps}, revenue: ${curr.revenue}`);
+    console.log(`[YoY Debug] Computing YoY for ${curr.date}, eps: ${curr.eps}, revenue: ${curr.revenue}`);
+    console.log(`[YoY Debug] Total earnings data: ${earningsByTs.length} records`);
+    console.log(`[YoY Debug] Available earnings dates:`, earningsByTs.map(e => `${e.date} (eps: ${e.eps}, rev: ${e.revenue})`));
     
     // Find prior ~1 year entry within ±120 days (older data can drift)
     const oneYearMs = 365 * 24 * 3600 * 1000;
@@ -76,7 +78,7 @@ export function detectBreakpoints(
     }
     
     if (!prior) {
-      debugLog(isDebugFlag('DEBUG_ANALYZE'), `[YoY Debug] No prior data within ±120d for ${curr.date}; trying nearest ~1y fallback`);
+      console.log(`[YoY Debug] No prior data within ±120d for ${curr.date}; trying nearest ~1y fallback`);
       // Fallback: nearest to 1y gap within 1.5y horizon
       let bestIdx = -1;
       let bestDelta = Number.POSITIVE_INFINITY;

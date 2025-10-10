@@ -14,7 +14,8 @@ function getEnvBoolean(name: string, defaultValue: boolean): boolean {
 }
 
 export function shouldUseFinnhubEarnings(): boolean {
-  return getEnvBoolean('USE_FINNHUB_EARNINGS', true);
+  // Temporarily disable Finnhub due to API key issues
+  return false; // getEnvBoolean('USE_FINNHUB_EARNINGS', true);
 }
 
 export function shouldUseFinnhubPrices(): boolean {
