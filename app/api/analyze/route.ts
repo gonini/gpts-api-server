@@ -102,6 +102,7 @@ async function handleRequest(request: NextRequest) {
 
     // GET 요청 (쿼리 파라미터) 또는 POST 요청 (JSON body) 지원
     let ticker: string, from: string, to: string;
+    let noCache = false;
 
     let benchTicker = 'SPY';
     const benchCandidates = new Set(['SPY', 'XLE', 'QQQ', 'IWM']);
@@ -111,6 +112,8 @@ async function handleRequest(request: NextRequest) {
       ticker = url.searchParams.get('ticker') || '';
       from = url.searchParams.get('from') || '';
       to = url.searchParams.get('to') || '';
+      const nc = url.searchParams.get('nocache') || url.searchParams.get('noCache');
+      if (nc && (nc === '1' || nc.toLowerCase() === 'true')) noCache = true;
       const benchParam = (url.searchParams.get('bench') || benchTicker).toUpperCase();
       if (benchCandidates.has(benchParam)) {
         benchTicker = benchParam;
@@ -139,6 +142,7 @@ async function handleRequest(request: NextRequest) {
       'X-Provider': useFinnhubEarnings ? 'finnhub' : 'legacy',
       'X-RateLimit-Remaining': rateLimit.remaining.toString(),
       'X-RateLimit-Reset': new Date(Date.now() + 60 * 1000).toISOString(),
+      ...(noCache ? { 'Cache-Control': 'no-store, no-cache, must-revalidate' } : {}),
     });
 
     console.log(`Fetching data for ${ticker} from ${from} to ${to}`);
@@ -148,7 +152,7 @@ async function handleRequest(request: NextRequest) {
     let earningsSource = 'finnhub';
     
     try {
-      earnings = await fetchEarnings(ticker, from, to);
+      earnings = await fetchEarnings(ticker, from, to, { noCache });
     } catch (error) {
       console.error('Earnings provider error:', error);
       if (
@@ -180,11 +184,11 @@ async function handleRequest(request: NextRequest) {
     }
 
     const [prices, bench] = await Promise.all([
-      fetchAdjPrices(ticker, from, to).catch(err => {
+      fetchAdjPrices(ticker, from, to, { noCache }).catch(err => {
         console.error('Prices API error:', err);
         throw new Error('ERR_NO_PRICES');
       }),
-      fetchAdjPrices(benchTicker, from, to).catch(err => {
+      fetchAdjPrices(benchTicker, from, to, { noCache }).catch(err => {
         console.error(`Bench API error (${benchTicker}):`, err);
         throw new Error('ERR_NO_BENCH');
       }),
