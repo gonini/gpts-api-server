@@ -52,7 +52,7 @@ export function detectBreakpoints(
   // Build quick index by time for YoY comparisons
   const earningsByTs = earningsSorted.map(e => ({ ...e, ts: new Date(e.date).getTime() }));
 
-  function computeYoY(currentIdx: number): { epsYoY?: number; revYoY?: number; flags?: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean } } {
+  function computeYoY(currentIdx: number): { epsYoY?: number; revYoY?: number; flags?: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean; eps_yoy_extreme?: boolean } } {
     const curr = earningsByTs[currentIdx];
     console.log(`[YoY Debug] Computing YoY for ${curr.date}, eps: ${curr.eps}, revenue: ${curr.revenue}`);
     console.log(`[YoY Debug] Total earnings data: ${earningsByTs.length} records`);
@@ -97,8 +97,8 @@ export function detectBreakpoints(
       }
     }
 
-    const out: { epsYoY?: number; revYoY?: number; flags?: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean } } = {};
-    const flags: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean } = {};
+    const out: { epsYoY?: number; revYoY?: number; flags?: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean; eps_yoy_extreme?: boolean } } = {};
+    const flags: { eps_yoy_nm?: boolean; rev_yoy_nm?: boolean; eps_yoy_extreme?: boolean } = {};
 
     if (prior) {
       debugLog(isDebugFlag('DEBUG_ANALYZE'), `[YoY Debug] Prior data found: ${prior.date}, eps: ${prior.eps}, revenue: ${prior.revenue}`);
@@ -111,6 +111,10 @@ export function detectBreakpoints(
         } else {
           out.epsYoY = (curr.eps - prior.eps) / Math.abs(prior.eps);
           debugLog(isDebugFlag('DEBUG_ANALYZE'), `[YoY Debug] EPS YoY calculated: ${out.epsYoY} (curr: ${curr.eps}, prior: ${prior.eps})`);
+          if (typeof out.epsYoY === 'number' && Math.abs(out.epsYoY) > 1.5) {
+            flags.eps_yoy_extreme = true;
+            debugLog(isDebugFlag('DEBUG_ANALYZE'), `[YoY Debug] EPS YoY extreme flagged (>150%)`);
+          }
         }
       } else {
         debugLog(isDebugFlag('DEBUG_ANALYZE'), `[YoY Debug] EPS YoY cannot be calculated - curr.eps: ${curr.eps} (${typeof curr.eps}), prior.eps: ${prior.eps} (${typeof prior.eps})`);

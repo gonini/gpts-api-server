@@ -73,16 +73,20 @@ export type CARResult = {
 
 export type AnalysisSegment = {
   label: string;
+  label_with_window?: string;
   day0?: string;
   earnings: {
     date: string;
     when: 'bmo' | 'amc' | 'dmh' | 'unknown';
     eps: number | null;
+    eps_basis?: 'GAAP_diluted';
+    split_adjusted?: boolean;
     eps_yoy: number | null;
     rev_yoy: number | null;
     flags?: {
       eps_yoy_nm?: true;
       rev_yoy_nm?: true;
+      eps_yoy_extreme?: true;
     };
   };
   period: {
@@ -95,12 +99,20 @@ export type AnalysisSegment = {
     ret_sum: number;
     bench_sum: number;
     window_days?: number;
+    car_tstat?: number;
+    market_model_used?: boolean;
+    alpha_beta?: { alpha: number; beta: number; n: number };
     flags?: {
       partial?: true;
       short_window?: true;
     };
   };
   source_urls: string[];
+  data_quality?: {
+    event_date_source: '8-K_ex99' | 'filed_at' | 'period_of_report';
+    event_date_corrected: boolean;
+  };
+  overlap_flag?: boolean;
 };
 
 export type AnalysisResponse = {

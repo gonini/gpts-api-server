@@ -116,3 +116,93 @@ export function alignPriceData(prices: PriceData[], bench: PriceData[]): {
     bench: alignedBench,
   };
 }
+
+// Market model (CAPM-light) utilities
+type OLS = { alpha: number; beta: number; n: number; residSD: number };
+
+function olsAlphaBeta(stock: PriceData[], market: PriceData[], endIdx: number, lookback: number): OLS | null {
+  // compute simple log returns over [endIdx-lookback, endIdx)
+  const startIdx = Math.max(0, endIdx - lookback);
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = startIdx; i < endIdx; i++) {
+    if (i + 1 >= stock.length || i + 1 >= market.length) break;
+    const ri = Math.log(stock[i + 1].adjClose / stock[i].adjClose);
+    const rm = Math.log(market[i + 1].adjClose / market[i].adjClose);
+    if (isFinite(ri) && isFinite(rm)) {
+      ys.push(ri);
+      xs.push(rm);
+    }
+  }
+  const n = xs.length;
+  if (n < 20) return null; // require minimum observations
+  const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
+  const xbar = mean(xs);
+  const ybar = mean(ys);
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) { num += (xs[i] - xbar) * (ys[i] - ybar); den += (xs[i] - xbar) ** 2; }
+  if (den === 0) return null;
+  const beta = num / den;
+  const alpha = ybar - beta * xbar;
+  // residual SD
+  let ss = 0;
+  for (let i = 0; i < n; i++) {
+    const pred = alpha + beta * xs[i];
+    const resid = ys[i] - pred;
+    ss += resid * resid;
+  }
+  const residSD = Math.sqrt(ss / Math.max(1, n - 2));
+  return { alpha, beta, n, residSD };
+}
+
+export function computeMarketModelCAR(
+  prices: PriceData[],
+  bench: PriceData[],
+  day0Idx: number,
+  window: [number, number],
+  estimationWindow = 252
+): InternalCAR & { car_tstat?: number; market_model_used: true; alpha_beta: { alpha: number; beta: number; n: number } } {
+  // estimate alpha/beta up to day0Idx (exclude event window)
+  const ols = olsAlphaBeta(prices, bench, Math.max(0, day0Idx), estimationWindow);
+  // fallback to simple diff if OLS not available
+  const base = computeCAR(prices, bench, day0Idx, window);
+  if (!ols) {
+    return { ...base, market_model_used: true, alpha_beta: { alpha: 0, beta: 1, n: 0 }, car_tstat: undefined };
+  }
+
+  const [startOffset, endOffset] = window;
+  let startIdx = day0Idx + startOffset;
+  let endIdx = day0Idx + endOffset;
+  let adjusted = false;
+  const maxIndex = Math.min(prices.length - 1, bench.length - 1);
+  if (startIdx < 0) { startIdx = 0; adjusted = true; }
+  if (endIdx > maxIndex) { endIdx = maxIndex; adjusted = true; }
+  if (startIdx >= endIdx) return { ...base, market_model_used: true, alpha_beta: { alpha: ols.alpha, beta: ols.beta, n: ols.n }, car_tstat: undefined };
+
+  let car = 0;
+  const ars: number[] = [];
+  for (let i = startIdx; i < endIdx; i++) {
+    if (i + 1 >= prices.length || i + 1 >= bench.length) break;
+    const ri = Math.log(prices[i + 1].adjClose / prices[i].adjClose);
+    const rm = Math.log(bench[i + 1].adjClose / bench[i].adjClose);
+    const exp = ols.alpha + ols.beta * rm;
+    const ar = ri - exp;
+    ars.push(ar);
+    car += ar;
+  }
+  const n = ars.length;
+  let car_tstat: number | undefined = undefined;
+  if (ols.residSD > 0 && n > 1) {
+    car_tstat = car / (ols.residSD / Math.sqrt(n));
+  }
+  return {
+    car,
+    ret_sum: base.ret_sum,
+    bench_sum: base.bench_sum,
+    __partial: adjusted || base.__partial,
+    __windowDays: n,
+    market_model_used: true,
+    car_tstat,
+    alpha_beta: { alpha: ols.alpha, beta: ols.beta, n: ols.n }
+  };
+}
