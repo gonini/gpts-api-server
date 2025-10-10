@@ -503,6 +503,36 @@ export async function fetchRevenueData(
   return rows;
 }
 
+// ---------- Ticker aliases (by CIK) ----------
+export async function getTickerAliasesFromSEC(ticker: string): Promise<string[]> {
+  try {
+    const key = `sec:cik_map:v1`;
+    const cached = await CacheService.get(key);
+    let map: Record<string, string> | null = cached ? JSON.parse(cached) : null;
+    if (!map) {
+      const url = `https://www.sec.gov/files/company_tickers.json`;
+      const res = await secFetch(url);
+      const data = await res.json();
+      map = {};
+      for (const [, v] of Object.entries<any>(data)) {
+        if (v?.ticker) {
+          map[v.ticker.toUpperCase()] = String(v.cik_str).padStart(10, '0');
+        }
+      }
+      await CacheService.setex(key, 86400, JSON.stringify(map));
+    }
+    const upper = ticker.toUpperCase();
+    const cik = map![upper];
+    if (!cik) return [upper];
+    const aliases = Object.keys(map!).filter(tk => map![tk] === cik);
+    // 항상 입력 심볼 포함
+    if (!aliases.includes(upper)) aliases.push(upper);
+    return Array.from(new Set(aliases));
+  } catch {
+    return [ticker.toUpperCase()];
+  }
+}
+
 // ---------- Raw filings (submissions) ----------
 async function fetchRawSECReports(cik: string, from: string, to: string, ticker?: string): Promise<RawRecentFiling[]> {
   const url = `${SEC_BASE}/submissions/CIK${cik.padStart(10, '0')}.json`;
