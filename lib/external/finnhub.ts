@@ -45,13 +45,16 @@ type FinnhubFetchOptions = {
   cacheKey: string;
   ttlSeconds: number;
   logLabel: string;
+  skipCache?: boolean;
 };
 
 async function fetchWithRetry<T>(url: string, parser: (json: any) => T, options: FinnhubFetchOptions): Promise<T> {
-  const cached = await CacheService.get(options.cacheKey);
-  if (cached) {
-    console.info(`[Finnhub] cache_hit=1 key=${options.cacheKey}`);
-    return JSON.parse(cached) as T;
+  if (!options.skipCache) {
+    const cached = await CacheService.get(options.cacheKey);
+    if (cached) {
+      console.info(`[Finnhub] cache_hit=1 key=${options.cacheKey}`);
+      return JSON.parse(cached) as T;
+    }
   }
 
   const apiKey = process.env.FINNHUB_API_KEY;
@@ -91,8 +94,10 @@ async function fetchWithRetry<T>(url: string, parser: (json: any) => T, options:
       const json = await response.json();
       const parsed = parser(json);
 
-      await CacheService.setex(options.cacheKey, options.ttlSeconds, JSON.stringify(parsed));
-      console.info(`[Finnhub] cache_store=1 key=${options.cacheKey} retries=${attempt - 1}`);
+      if (!options.skipCache) {
+        await CacheService.setex(options.cacheKey, options.ttlSeconds, JSON.stringify(parsed));
+        console.info(`[Finnhub] cache_store=1 key=${options.cacheKey} retries=${attempt - 1}`);
+      }
 
       return parsed;
     } catch (error) {
@@ -119,7 +124,7 @@ function normalizeFinnhubDate(date: string): string {
   return dt.toISODate();
 }
 
-export async function fetchFinnhubEarnings(ticker: string, from: string, to: string): Promise<EarningsRow[]> {
+export async function fetchFinnhubEarnings(ticker: string, from: string, to: string, opts?: { noCache?: boolean }): Promise<EarningsRow[]> {
   const apiKey = process.env.FINNHUB_API_KEY;
   if (!apiKey) {
     throw new Error('ERR_SOURCE_UNAVAILABLE');
@@ -151,10 +156,11 @@ export async function fetchFinnhubEarnings(ticker: string, from: string, to: str
     cacheKey: `finnhub:earnings:${ticker}:${from}:${to}`,
     ttlSeconds: 72 * 60 * 60,
     logLabel: 'earnings',
+    skipCache: opts?.noCache === true,
   });
 }
 
-export async function fetchFinnhubPrices(ticker: string, from: string, to: string): Promise<PriceData[]> {
+export async function fetchFinnhubPrices(ticker: string, from: string, to: string, opts?: { noCache?: boolean }): Promise<PriceData[]> {
   const apiKey = process.env.FINNHUB_API_KEY;
   if (!apiKey) {
     throw new Error('ERR_SOURCE_UNAVAILABLE');
@@ -204,6 +210,7 @@ export async function fetchFinnhubPrices(ticker: string, from: string, to: strin
     cacheKey: `finnhub:prices:${ticker}:${from}:${to}`,
     ttlSeconds: 60 * 60,
     logLabel: 'prices',
+    skipCache: opts?.noCache === true,
   });
 }
 
