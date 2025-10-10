@@ -182,8 +182,10 @@ export async function fetchEarnings(
     }
   }
 
-  console.log(`[Yahoo] USE_FINNHUB_EARNINGS disabled; falling back to legacy earnings for ${ticker}`);
-  return filterEarningsByRange(await fetchYahooEarnings(ticker, from, to), from, to);
+  console.log(`[Yahoo] USE_FINNHUB_EARNINGS disabled; using Yahoo Finance earnings for ${ticker}`);
+  const yahooData = await fetchYahooEarnings(ticker, from, to);
+  console.log(`[Yahoo] Yahoo Finance earnings data for ${ticker}:`, yahooData.map(e => ({ date: e.date, eps: e.eps, revenue: e.revenue })));
+  return filterEarningsByRange(yahooData, from, to);
 }
 
 /**
@@ -453,7 +455,7 @@ function parseAlphaVantageData(
     }
     
     console.log(`Parsed ${earningsData.length} earnings records from Alpha Vantage for ${ticker}`);
-    return earningsData;
+    // defer return to allow revenue merge step below
     
   } catch (error) {
     console.error(`Error parsing Alpha Vantage data for ${ticker}:`, error instanceof Error ? error.message : String(error));
@@ -533,6 +535,7 @@ function parseAlphaVantageData(
   } catch (err: any) {
     console.log(`Alpha Vantage quarterlyReports merge failed: ${err?.message ?? String(err)}`);
   }
+  return earningsData;
 }
 
 /**
