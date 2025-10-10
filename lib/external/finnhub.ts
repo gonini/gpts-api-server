@@ -14,8 +14,7 @@ function getEnvBoolean(name: string, defaultValue: boolean): boolean {
 }
 
 export function shouldUseFinnhubEarnings(): boolean {
-  // Temporarily disable Finnhub due to API key issues
-  return false; // getEnvBoolean('USE_FINNHUB_EARNINGS', true);
+  return getEnvBoolean('USE_FINNHUB_EARNINGS', true);
 }
 
 export function shouldUseFinnhubPrices(): boolean {
@@ -130,34 +129,55 @@ export async function fetchFinnhubEarnings(ticker: string, from: string, to: str
     throw new Error('ERR_SOURCE_UNAVAILABLE');
   }
 
-  const url = buildFinnhubUrl('/calendar/earnings', {
-    symbol: ticker,
-    from,
-    to,
-    token: apiKey,
-  });
+  // Resolve provider-aware symbol candidates (date-aware cutover)
+  const { getTickerAliasesFromSEC } = await import('@/lib/external/sec-edgar');
+  const { getOfflineAliases, orderAliasesByCutover, providerNormalizeCandidates } = await import('@/lib/core/symbols');
+  const aliasesSEC = await getTickerAliasesFromSEC(ticker).catch(() => [ticker]);
+  const aliasesOffline = getOfflineAliases(ticker);
+  const mergedAliases = Array.from(new Set<string>([...aliasesSEC, ...aliasesOffline]));
+  const ordered = orderAliasesByCutover(ticker, mergedAliases, from, to);
+  const finnhubSymbols = Array.from(new Set(ordered.flatMap(sym => providerNormalizeCandidates(sym, 'finnhub'))));
 
-  const parser = (json: any): EarningsRow[] => {
-    const parsed = FinnhubEarningsSchema.safeParse(json);
-    if (!parsed.success) {
-      console.error('[Finnhub] earnings schema validation failed', parsed.error.format());
-      throw new Error('ERR_SOURCE_UNAVAILABLE');
+  for (const symbol of finnhubSymbols) {
+    const url = buildFinnhubUrl('/calendar/earnings', {
+      symbol,
+      from,
+      to,
+      token: apiKey,
+    });
+
+    const parser = (json: any): EarningsRow[] => {
+      const parsed = FinnhubEarningsSchema.safeParse(json);
+      if (!parsed.success) {
+        console.error('[Finnhub] earnings schema validation failed', parsed.error.format());
+        throw new Error('ERR_SOURCE_UNAVAILABLE');
+      }
+
+      return parsed.data.earningsCalendar.map(entry => ({
+        date: normalizeFinnhubDate(entry.date),
+        when: (entry.time || entry.hour) === 'bmo' || (entry.time || entry.hour) === 'amc' || (entry.time || entry.hour) === 'dmh' ? (entry.time || entry.hour) as 'bmo' | 'amc' | 'dmh' : 'unknown',
+        eps: typeof entry.epsActual === 'number' ? entry.epsActual : null,
+        revenue: typeof entry.revenueActual === 'number' ? entry.revenueActual : null,
+      }));
+    };
+
+    try {
+      const rows = await fetchWithRetry(url, parser, {
+        cacheKey: `finnhub:earnings:${symbol}:${from}:${to}`,
+        ttlSeconds: 72 * 60 * 60,
+        logLabel: 'earnings',
+        skipCache: opts?.noCache === true,
+      });
+      if (Array.isArray(rows) && rows.length > 0) {
+        return rows;
+      }
+    } catch (e) {
+      // try next candidate
+      continue;
     }
+  }
 
-    return parsed.data.earningsCalendar.map(entry => ({
-      date: normalizeFinnhubDate(entry.date),
-      when: (entry.time || entry.hour) === 'bmo' || (entry.time || entry.hour) === 'amc' || (entry.time || entry.hour) === 'dmh' ? (entry.time || entry.hour) as 'bmo' | 'amc' | 'dmh' : 'unknown',
-      eps: typeof entry.epsActual === 'number' ? entry.epsActual : null,
-      revenue: typeof entry.revenueActual === 'number' ? entry.revenueActual : null,
-    }));
-  };
-
-  return fetchWithRetry(url, parser, {
-    cacheKey: `finnhub:earnings:${ticker}:${from}:${to}`,
-    ttlSeconds: 72 * 60 * 60,
-    logLabel: 'earnings',
-    skipCache: opts?.noCache === true,
-  });
+  return [];
 }
 
 export async function fetchFinnhubPrices(ticker: string, from: string, to: string, opts?: { noCache?: boolean }): Promise<PriceData[]> {
@@ -169,48 +189,69 @@ export async function fetchFinnhubPrices(ticker: string, from: string, to: strin
   const fromDate = DateTime.fromISO(from, { zone: 'America/New_York' }).startOf('day');
   const toDate = DateTime.fromISO(to, { zone: 'America/New_York' }).endOf('day');
 
-  const url = buildFinnhubUrl('/stock/candle', {
-    symbol: ticker,
-    resolution: 'D',
-    from: Math.floor(fromDate.toUTC().toSeconds()),
-    to: Math.floor(toDate.toUTC().toSeconds()),
-    token: apiKey,
-  });
+  const { getTickerAliasesFromSEC } = await import('@/lib/external/sec-edgar');
+  const { getOfflineAliases, orderAliasesByCutover, providerNormalizeCandidates } = await import('@/lib/core/symbols');
+  const aliasesSEC = await getTickerAliasesFromSEC(ticker).catch(() => [ticker]);
+  const aliasesOffline = getOfflineAliases(ticker);
+  const mergedAliases = Array.from(new Set<string>([...aliasesSEC, ...aliasesOffline]));
+  const ordered = orderAliasesByCutover(ticker, mergedAliases, from, to);
+  const finnhubSymbols = Array.from(new Set(ordered.flatMap(sym => providerNormalizeCandidates(sym, 'finnhub'))));
 
-  const parser = (json: any): PriceData[] => {
-    if (!json || json.s !== 'ok' || !Array.isArray(json.t) || !Array.isArray(json.c)) {
-      console.error('[Finnhub] price schema unexpected', json);
-      throw new Error('ERR_SOURCE_UNAVAILABLE');
+  for (const symbol of finnhubSymbols) {
+    const url = buildFinnhubUrl('/stock/candle', {
+      symbol,
+      resolution: 'D',
+      from: Math.floor(fromDate.toUTC().toSeconds()),
+      to: Math.floor(toDate.toUTC().toSeconds()),
+      token: apiKey,
+    });
+
+    const parser = (json: any): PriceData[] => {
+      if (!json || json.s !== 'ok' || !Array.isArray(json.t) || !Array.isArray(json.c)) {
+        console.error('[Finnhub] price schema unexpected', json);
+        throw new Error('ERR_SOURCE_UNAVAILABLE');
+      }
+
+      const timestamps: number[] = json.t;
+      const closes: number[] = json.c;
+
+      const rows = timestamps
+        .map((timestamp, index) => {
+          const close = closes[index];
+          if (typeof close !== 'number' || !isFinite(close)) {
+            return null;
+          }
+
+          const date = DateTime.fromSeconds(timestamp, { zone: 'America/New_York' }).toISODate();
+          if (!date) {
+            return null;
+          }
+
+          return {
+            date,
+            adjClose: close,
+          } satisfies PriceData;
+        })
+        .filter((value): value is PriceData => Boolean(value));
+      return rows;
+    };
+
+    try {
+      const rows = await fetchWithRetry(url, parser, {
+        cacheKey: `finnhub:prices:${symbol}:${from}:${to}`,
+        ttlSeconds: 60 * 60,
+        logLabel: 'prices',
+        skipCache: opts?.noCache === true,
+      });
+      if (Array.isArray(rows) && rows.length > 0) {
+        return rows;
+      }
+    } catch (e) {
+      // try next candidate
+      continue;
     }
+  }
 
-    const timestamps: number[] = json.t;
-    const closes: number[] = json.c;
-
-    return timestamps
-      .map((timestamp, index) => {
-        const close = closes[index];
-        if (typeof close !== 'number' || !isFinite(close)) {
-          return null;
-        }
-
-        const date = DateTime.fromSeconds(timestamp, { zone: 'America/New_York' }).toISODate();
-        if (!date) {
-          return null;
-        }
-
-        return {
-          date,
-          adjClose: close,
-        } satisfies PriceData;
-      })
-      .filter((value): value is PriceData => Boolean(value));
-  };
-
-  return fetchWithRetry(url, parser, {
-    cacheKey: `finnhub:prices:${ticker}:${from}:${to}`,
-    ttlSeconds: 60 * 60,
-    logLabel: 'prices',
-    skipCache: opts?.noCache === true,
-  });
+  throw new Error('ERR_SOURCE_UNAVAILABLE');
 }
 
