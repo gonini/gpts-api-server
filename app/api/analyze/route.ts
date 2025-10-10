@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AnalysisRequestSchema, AnalysisResponse, AnalysisSegment } from '@/lib/core/schema';
 import { fetchAdjPrices, fetchEarnings } from '@/lib/external/yahoo-finance';
+import { getOfflineAliases, orderAliasesByCutover } from '@/lib/core/symbols';
+import { getTickerAliasesFromSEC } from '@/lib/external/sec-edgar';
 import { detectBreakpoints, getLastEpsNormalizationMeta } from '@/lib/core/breakpoints';
 import { resolveDay0, getTradingDates, formatDateRange, getLastResolveDay0Meta } from '@/lib/core/calendar';
 import { computeCAR, alignPriceData } from '@/lib/core/car';
@@ -147,12 +149,40 @@ async function handleRequest(request: NextRequest) {
 
     console.log(`Fetching data for ${ticker} from ${from} to ${to}`);
 
+    // Resolve canonical provider ticker by date-aware alias/cutover (e.g., GOOGL→GOOG before 2014-04-03)
+    let providerTicker = ticker.toUpperCase();
+    try {
+      const offlineAliases = getOfflineAliases(ticker);
+      const secAliases = await getTickerAliasesFromSEC(ticker).catch(() => [] as string[]);
+      const merged = Array.from(new Set<string>([...offlineAliases, ...secAliases]));
+      const ordered = orderAliasesByCutover(ticker, merged, from, to);
+      if (ordered.length > 0) providerTicker = ordered[0];
+      console.log(`[Symbols] providerTicker resolved: ${ticker} -> ${providerTicker} for ${from}..${to}`);
+    } catch (e) {
+      console.warn('[Symbols] providerTicker resolution failed, using raw ticker', e);
+    }
+
+    // Extend fetch window backwards to ensure YoY comparisons have prior data even at range start
+    const extendDays = 400; // ~13 months
+    const shiftDateByDays = (iso: string, days: number) => {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      d.setDate(d.getDate() + days);
+      const y = d.getFullYear();
+      const m = `${d.getMonth() + 1}`.padStart(2, '0');
+      const dd = `${d.getDate()}`.padStart(2, '0');
+      return `${y}-${m}-${dd}`;
+    };
+    const originalFrom = from;
+    const originalTo = to;
+    const extendedFrom = shiftDateByDays(from, -extendDays);
+
     type EarningsResult = Awaited<ReturnType<typeof fetchEarnings>>;
     let earnings: EarningsResult;
     let earningsSource = 'finnhub';
     
     try {
-      earnings = await fetchEarnings(ticker, from, to, { noCache });
+      earnings = await fetchEarnings(providerTicker, extendedFrom, to, { noCache });
     } catch (error) {
       console.error('Earnings provider error:', error);
       if (
@@ -184,11 +214,11 @@ async function handleRequest(request: NextRequest) {
     }
 
     const [prices, bench] = await Promise.all([
-      fetchAdjPrices(ticker, from, to, { noCache }).catch(err => {
+      fetchAdjPrices(providerTicker, extendedFrom, to, { noCache }).catch(err => {
         console.error('Prices API error:', err);
         throw new Error('ERR_NO_PRICES');
       }),
-      fetchAdjPrices(benchTicker, from, to, { noCache }).catch(err => {
+      fetchAdjPrices(benchTicker, extendedFrom, to, { noCache }).catch(err => {
         console.error(`Bench API error (${benchTicker}):`, err);
         throw new Error('ERR_NO_BENCH');
       }),
@@ -223,7 +253,7 @@ async function handleRequest(request: NextRequest) {
     if (needEnrich && enableSEC) {
       try {
         const timeoutMs = parseInt(process.env.ANALYZE_SEC_TIMEOUT_MS || '2500', 10);
-        const secPromise = extractEarningsFromSECReports(ticker, from, to);
+        const secPromise = extractEarningsFromSECReports(ticker, extendedFrom, to);
         const secEarnings: MinimalEarnings[] = await Promise.race([
           secPromise,
           new Promise<MinimalEarnings[]>((resolve) => setTimeout(() => resolve([] as MinimalEarnings[]), isNaN(timeoutMs) ? 2500 : timeoutMs))
@@ -412,8 +442,9 @@ async function handleRequest(request: NextRequest) {
                   ? (breakpoint.when as 'bmo' | 'amc' | 'dmh')
                   : 'unknown',
                 eps: breakpoint.eps ?? null,
-                eps_yoy: breakpoint.epsYoY ?? null,
-                rev_yoy: breakpoint.revYoY ?? null,
+                // Use computed values only; if unavailable or NM, leave null and signal via flags
+                eps_yoy: (typeof breakpoint.epsYoY === 'number') ? breakpoint.epsYoY : null,
+                rev_yoy: (typeof breakpoint.revYoY === 'number') ? breakpoint.revYoY : null,
                 flags: breakpoint.flags ? {
                   eps_yoy_nm: breakpoint.flags.eps_yoy_nm ? true : undefined,
                   rev_yoy_nm: breakpoint.flags.rev_yoy_nm ? true : undefined,
@@ -455,10 +486,18 @@ async function handleRequest(request: NextRequest) {
     notesBase.forEach(note => responseNotes.add(note));
     notesFlags.forEach(note => responseNotes.add(note));
 
+    // Filter segments back to original requested window
+    const filteredSegments = segments.filter(seg => {
+      const d = new Date(seg.earnings.date).getTime();
+      const f = new Date(originalFrom).getTime();
+      const t = new Date(originalTo).getTime();
+      return !isNaN(d) && d >= f && d <= t;
+    });
+
     const response: AnalysisResponse = {
       ticker,
       as_of: new Date().toISOString().split('T')[0],
-      segments,
+      segments: filteredSegments,
       notes: Array.from(responseNotes),
     };
 
