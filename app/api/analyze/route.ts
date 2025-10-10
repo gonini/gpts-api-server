@@ -82,6 +82,20 @@ export async function POST(request: NextRequest) {
   return handleRequest(request);
 }
 
+function isValidISODate(date: string): boolean {
+  const m = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (!Number.isInteger(year) || year < 1900 || year > 2100) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return false;
+  return d.toISOString().slice(0, 10) === date;
+}
+
 async function handleRequest(request: NextRequest) {
   try {
     // 레이트 리미팅 체크
@@ -134,6 +148,22 @@ async function handleRequest(request: NextRequest) {
         success: false,
         error: 'ERR_INVALID_INPUT',
         message: 'Missing required parameters: ticker, from, to',
+      }, { status: 400 });
+    }
+
+    // 날짜 포맷/연도 유효성 검증 (YYYY-MM-DD, 1900~2100, 정상 캘린더 날짜)
+    if (!isValidISODate(from) || !isValidISODate(to)) {
+      return NextResponse.json({
+        success: false,
+        error: 'ERR_INVALID_DATE_FORMAT',
+        message: 'from/to must be valid ISO dates (YYYY-MM-DD) with a sane year (1900-2100).',
+      }, { status: 400 });
+    }
+    if (new Date(from).getTime() > new Date(to).getTime()) {
+      return NextResponse.json({
+        success: false,
+        error: 'ERR_INVALID_DATE_RANGE',
+        message: '`from` must be earlier than or equal to `to`.',
       }, { status: 400 });
     }
 
@@ -246,9 +276,8 @@ async function handleRequest(request: NextRequest) {
     }
     
     // If no earnings data from Finnhub, try SEC Reports as fallback
-    // Merge in SEC-derived earnings to enrich revenue/EPS only when needed and not on Vercel
-    const isVercel = !!process.env.VERCEL;
-    const enableSEC = process.env.ANALYZE_SEC_ENRICH === '1' && !isVercel;
+    // Merge in SEC-derived earnings to enrich revenue/EPS only when needed (consistent across envs)
+    const enableSEC = process.env.ANALYZE_SEC_ENRICH === '1';
     const needEnrich = earnings.length === 0 || earnings.some(e => e.revenue == null || e.eps == null);
     if (needEnrich && enableSEC) {
       try {
