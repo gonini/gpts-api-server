@@ -161,7 +161,7 @@ export function computeMarketModelCAR(
   day0Idx: number,
   window: [number, number],
   estimationWindow = 252
-): InternalCAR & { car_tstat?: number; market_model_used: true; alpha_beta: { alpha: number; beta: number; n: number } } {
+): InternalCAR & { car_tstat?: number; market_model_used: true; alpha_beta: { alpha: number; beta: number; n: number }, tstat_flags?: { sigma_floor?: true; event_sd?: true; recomputed?: true } } {
   // estimate alpha/beta up to day0Idx (exclude event window)
   const ols = olsAlphaBeta(prices, bench, Math.max(0, day0Idx), estimationWindow);
   // fallback to simple diff if OLS not available
@@ -192,9 +192,50 @@ export function computeMarketModelCAR(
   }
   const n = ars.length;
   let car_tstat: number | undefined = undefined;
-  if (ols.residSD > 0 && n > 1) {
-    car_tstat = car / (ols.residSD / Math.sqrt(n));
+  // t-stat 모드 및 하한
+  const method = (process.env.CAR_TSTAT_METHOD === 'event') ? 'event' : 'resid';
+  const sigmaFloor = 1e-4;
+  const __tstatFlags: { sigma_floor?: true; event_sd?: true; recomputed?: true } = {};
+  if (n > 1) {
+    if (method === 'resid') {
+      const sd = Math.max(ols.residSD, sigmaFloor);
+      if (sd === sigmaFloor) __tstatFlags.sigma_floor = true;
+      const t_resid = car / (sd / Math.sqrt(n));
+      car_tstat = t_resid;
+      // 과대 t-stat 자동 보정: resid 기준 |t|>10이면 이벤트창 표준편차로 병행 계산 후 더 보수적인 쪽 사용
+      if (typeof t_resid === 'number' && Math.abs(t_resid) > 10) {
+        const mean = ars.reduce((s, v) => s + v, 0) / n;
+        const varSum = ars.reduce((s, v) => s + (v - mean) * (v - mean), 0);
+        const sdEvent = Math.max(Math.sqrt(varSum / Math.max(1, n - 1)), sigmaFloor);
+        const t_event = car / (sdEvent / Math.sqrt(n));
+        if (Math.abs(t_event) < Math.abs(t_resid)) {
+          __tstatFlags.event_sd = true;
+          __tstatFlags.recomputed = true;
+          car_tstat = t_event;
+        }
+      }
+    } else {
+      // 이벤트창 내부 AR 표준편차 기반
+      const sdEvent = (() => {
+        if (n <= 1) return sigmaFloor;
+        const mean = ars.reduce((s, v) => s + v, 0) / n;
+        const varSum = ars.reduce((s, v) => s + (v - mean) * (v - mean), 0);
+        const sd = Math.sqrt(varSum / Math.max(1, n - 1));
+        return Math.max(sd, sigmaFloor);
+      })();
+      __tstatFlags.event_sd = true;
+      car_tstat = car / (sdEvent / Math.sqrt(n));
+    }
   }
+  // clamp unrealistic t-stats to ±10 for stability
+  if (typeof car_tstat === 'number' && Math.abs(car_tstat) > 10) {
+    __tstatFlags.recomputed = true;
+    __tstatFlags.event_sd = __tstatFlags.event_sd || method === 'event' ? true : (__tstatFlags.event_sd as any);
+    ;
+    (car_tstat as number) = (car_tstat > 0 ? 10 : -10);
+    (__tstatFlags as any).clamped = true;
+  }
+
   return {
     car,
     ret_sum: base.ret_sum,
@@ -203,6 +244,7 @@ export function computeMarketModelCAR(
     __windowDays: n,
     market_model_used: true,
     car_tstat,
-    alpha_beta: { alpha: ols.alpha, beta: ols.beta, n: ols.n }
+    alpha_beta: { alpha: ols.alpha, beta: ols.beta, n: ols.n },
+    tstat_flags: Object.keys(__tstatFlags).length ? __tstatFlags : undefined
   };
 }
