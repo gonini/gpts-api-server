@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AnalysisRequestSchema, AnalysisResponse, AnalysisSegment } from '@/lib/core/schema';
-import { fetchAdjPrices, fetchEarnings } from '@/lib/external/yahoo-finance';
+import { fetchAdjPrices, fetchEarnings, probeAlphaVantageCause } from '@/lib/external/yahoo-finance';
 import { getOfflineAliases, orderAliasesByCutover } from '@/lib/core/symbols';
 import { getTickerAliasesFromSEC } from '@/lib/external/sec-edgar';
 import { detectBreakpoints, getLastEpsNormalizationMeta } from '@/lib/core/breakpoints';
@@ -21,7 +21,7 @@ export const dynamic = 'force-dynamic';
 /**
  * Extract earnings data from SEC Reports for historical analysis
  */
-type MinimalEarnings = { date: string; when: 'bmo' | 'amc' | 'dmh' | 'unknown'; eps: number | null; revenue: number | null };
+type MinimalEarnings = { date: string; when: 'bmo' | 'amc' | 'dmh' | 'unknown'; eps: number | null; revenue: number | null; eps_src?: 'sec_pr' };
 
 async function extractEarningsFromSECReports(ticker: string, from: string, to: string): Promise<MinimalEarnings[]> {
   try {
@@ -59,12 +59,21 @@ async function extractEarningsFromSECReports(ticker: string, from: string, to: s
           // Use event_date (preferred) or filing date as earnings date
           const eventISO = report.event_date || report.period_of_report || (report.filed_at ? report.filed_at.slice(0,10) : null);
           if (!eventISO) continue;
-          earnings.push({
-          date: eventISO,
-            when: 'unknown',
-            eps: null,
-            revenue: null,
-          });
+          // Try to parse EPS from press release text (Exhibit 99)
+          let epsFromPR: number | null = null;
+          try {
+            const press = (report.exhibits || []).find((e) => e.type === 'press_release' && /(htm|html|txt)$/i.test(e.href));
+            const href = press?.href || report.urls?.primary;
+            if (href) {
+              const res = await fetch(href, { headers: { 'Accept': 'text/html,text/plain,*/*', 'User-Agent': process.env.SEC_USER_AGENT || 'gpts-api-server/1.0' } });
+              if (res.ok) {
+                const raw = await res.text();
+                const text = raw.replace(/\s+/g, ' ').slice(0, 200000);
+                epsFromPR = extractDilutedEPSFromText(text);
+              }
+            }
+          } catch {}
+          earnings.push({ date: eventISO, when: 'unknown', eps: epsFromPR, revenue: null, eps_src: epsFromPR != null ? 'sec_pr' : undefined });
       }
     }
     
@@ -74,6 +83,25 @@ async function extractEarningsFromSECReports(ticker: string, from: string, to: s
     console.warn('Failed to extract earnings from SEC Reports:', error);
     return [];
   }
+}
+
+// Very lightweight diluted EPS extractor from press text
+function extractDilutedEPSFromText(text: string): number | null {
+  // Pattern 1: "Diluted earnings per share ... $X.XX" or "Diluted EPS $X.XX"
+  const patterns: RegExp[] = [
+    /diluted\s+(?:earnings|net\s+income)?.{0,40}?(?:per\s+share|eps)[^$\d]{0,20}\$\s*([0-9]+(?:\.[0-9]+)?)/i,
+    /earnings\s+per\s+share[^$]*diluted[^$]*\$\s*([0-9]+(?:\.[0-9]+)?)/i,
+    /diluted\s+eps[^$]*\$\s*([0-9]+(?:\.[0-9]+)?)/i,
+    /net\s+income\s+per\s+share[^$]*?basic[^$]*?\$\s*([0-9]+(?:\.[0-9]+)?)[^$]*?diluted[^$]*?\$\s*([0-9]+(?:\.[0-9]+)?)/i,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (m) {
+      const val = m[2] ? parseFloat(m[2]) : parseFloat(m[1]);
+      if (isFinite(val)) return val;
+    }
+  }
+  return null;
 }
 
 export async function GET(request: NextRequest) {
@@ -213,6 +241,7 @@ async function handleRequest(request: NextRequest) {
     let earnings: EarningsResult;
     let earningsSource = 'finnhub';
     
+    let causeNotes: string[] = [];
     try {
       earnings = await fetchEarnings(providerTicker, extendedFrom, to, { noCache });
     } catch (error) {
@@ -290,8 +319,8 @@ async function handleRequest(request: NextRequest) {
           new Promise<MinimalEarnings[]>((resolve) => setTimeout(() => resolve([] as MinimalEarnings[]), isNaN(timeoutMs) ? 2500 : timeoutMs))
         ]);
         if (secEarnings.length > 0) {
-          const byDate = new Map<string, { date: string; eps: number | null; revenue: number | null; when?: string }>();
-          for (const e of earnings) byDate.set(e.date, { ...e });
+          const byDate = new Map<string, { date: string; eps: number | null; revenue: number | null; when?: string; eps_src?: 'sec_pr' }>();
+          for (const e of earnings) byDate.set(e.date, { ...e } as any);
           const padDays = 45 * 24 * 3600 * 1000; // ±45 days match window
           const earnList = Array.from(byDate.values()).map(e => ({ ...e, ts: new Date(e.date).getTime() }));
           for (const s of secEarnings) {
@@ -300,7 +329,7 @@ async function handleRequest(request: NextRequest) {
             const exact = byDate.get(s.date);
             if (exact) {
               if (exact.revenue == null && s.revenue != null) exact.revenue = s.revenue;
-              if (exact.eps == null && s.eps != null) exact.eps = s.eps;
+              if (exact.eps == null && s.eps != null) { exact.eps = s.eps; if (s.eps_src) exact.eps_src = s.eps_src; }
               byDate.set(s.date, exact);
               continue;
             }
@@ -313,12 +342,12 @@ async function handleRequest(request: NextRequest) {
             if (bestIdx >= 0) {
               const merged = earnList[bestIdx];
               if (merged.revenue == null && s.revenue != null) merged.revenue = s.revenue;
-              if (merged.eps == null && s.eps != null) merged.eps = s.eps;
-              byDate.set(merged.date, { date: merged.date, eps: merged.eps ?? null, revenue: merged.revenue ?? null, when: merged.when });
+              if (merged.eps == null && s.eps != null) { (merged as any).eps = s.eps; if (s.eps_src) (merged as any).eps_src = s.eps_src; }
+              byDate.set(merged.date, { date: merged.date, eps: (merged as any).eps ?? null, revenue: merged.revenue ?? null, when: (merged as any).when, eps_src: (merged as any).eps_src });
             } else {
               // add as new earnings point if it falls inside range
               if (ts >= new Date(from).getTime() && ts <= new Date(to).getTime()) {
-                byDate.set(s.date, { date: s.date, eps: s.eps ?? null, revenue: s.revenue ?? null, when: s.when });
+                byDate.set(s.date, { date: s.date, eps: s.eps ?? null, revenue: s.revenue ?? null, when: s.when, eps_src: s.eps_src });
               }
             }
           }
@@ -328,6 +357,8 @@ async function handleRequest(request: NextRequest) {
               when: (e.when === 'bmo' || e.when === 'amc' || e.when === 'dmh') ? (e.when as 'bmo'|'amc'|'dmh') : 'unknown' as const,
               eps: e.eps ?? null,
               revenue: e.revenue ?? null,
+              // propagate sec_pr source
+              ...(e.eps_src ? { eps_src: e.eps_src } : {}),
             }))
             .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
         }
@@ -358,6 +389,23 @@ async function handleRequest(request: NextRequest) {
 
     if (earnings.length === 0) {
       console.log('No earnings data found, returning empty segments');
+      // Diagnose root causes across providers and include in notes
+      try {
+        // Finnhub
+        notesBase.add('cause_finnhub=no_data');
+      } catch {}
+      try {
+        // Alpha Vantage probe
+        const av = await probeAlphaVantageCause(providerTicker, extendedFrom, to);
+        notesBase.add(`cause_alpha_vantage=${av}`);
+      } catch {}
+      try {
+        // SEC global 429 block flag from cache, if any
+        const blocked = await (async ()=>{
+          try { const v = await (await import('@/lib/kv')).CacheService.get('sec:block:until'); return v; } catch { return null; }
+        })();
+        if (blocked) notesBase.add('cause_sec=blocked_429'); else notesBase.add('cause_sec=unknown_or_not_used');
+      } catch {}
       return NextResponse.json(
         {
           success: true,
@@ -383,9 +431,16 @@ async function handleRequest(request: NextRequest) {
 
     // 3. EPS 표준화(회사facts + 분할 소급) 시도
     try {
-      const normalized = await normalizeGAAPDilutedEPS(ticker, extendedFrom, to, earnings.map(e => ({ date: e.date, eps: e.eps })));
-      const normMap = new Map(normalized.map(x => [x.date, x.eps]));
-      earnings = earnings.map(e => ({ ...e, eps: (normMap.get(e.date) ?? e.eps) }));
+      const normalized = await normalizeGAAPDilutedEPS(ticker, extendedFrom, to, earnings.map(e => ({ date: e.date, eps: e.eps, source: (e as any).eps_src === 'sec_pr' ? 'sec_pr' : undefined })) as any);
+      const normMap = new Map(normalized.map(x => [x.date, x]));
+      const allowVendorEps = process.env.EPS_VENDOR_FALLBACK === '1';
+      earnings = earnings.map(e => {
+        const n = normMap.get(e.date);
+        const secOrRatio = (typeof n?.eps === 'number') ? n?.eps : null;
+        const vendor = (typeof e.eps === 'number') ? e.eps : null;
+        const finalEps = allowVendorEps ? (secOrRatio ?? vendor) : secOrRatio;
+        return { ...e, eps: finalEps, eps_debug: n?.debug } as any;
+      });
     } catch (e) {
       console.warn(`[EPS Normalize] skipped: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -536,6 +591,8 @@ async function handleRequest(request: NextRequest) {
                   eps_yoy_nm: breakpoint.flags.eps_yoy_nm ? true : undefined,
                   rev_yoy_nm: breakpoint.flags.rev_yoy_nm ? true : undefined,
                 } : undefined,
+                // @ts-ignore debug hook: expose chosen EPS source & split factor
+                eps_debug: (earnings.find(x => x.date === correctedDateISO) as any)?.eps_debug
               },
               period,
               day0: day0Date,
@@ -548,6 +605,8 @@ async function handleRequest(request: NextRequest) {
                 car_tstat: carMM.car_tstat,
                 market_model_used: true,
                 alpha_beta: carMM.alpha_beta,
+                // @ts-ignore include t-stat flags when present
+                tstat_flags: (carMM as any).tstat_flags,
                 flags: Object.keys(priceReactionFlags).length ? priceReactionFlags : undefined,
               },
               source_urls: buildSourceUrls(ticker, benchTicker, from, to, priceProviderLabel),
