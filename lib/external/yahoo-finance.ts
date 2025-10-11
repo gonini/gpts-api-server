@@ -291,6 +291,44 @@ export async function fetchEarnings(
 }
 
 /**
+ * Diagnose Alpha Vantage availability/cause quickly for a ticker/date range.
+ * Returns one of: 'rate_limited' | 'no_data' | 'ok' | 'error'
+ */
+export async function probeAlphaVantageCause(
+  ticker: string,
+  from: string,
+  to: string
+): Promise<'rate_limited'|'no_data'|'ok'|'error'> {
+  try {
+    const alphaVantageApiKey = process.env.ALPHA_VANTAGE_API_KEY || 'ACQM8ZYA8BB62RSK';
+    if (!alphaVantageApiKey) return 'error';
+    const aliasesSEC = await getTickerAliasesFromSEC(ticker);
+    const aliasesOffline = getOfflineAliases(ticker);
+    const mergedAliases = Array.from(new Set([...aliasesSEC, ...aliasesOffline]));
+    const uniqueAliases = orderAliasesByCutover(ticker, mergedAliases, from, to);
+    const sym = uniqueAliases[0] || ticker;
+    const url = `https://www.alphavantage.co/query?function=EARNINGS&symbol=${sym}&apikey=${alphaVantageApiKey}`;
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(url, {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'GPTs-API-Server/1.0' },
+      signal: controller.signal,
+    });
+    if (!res.ok) return 'error';
+    const data: unknown = await res.json();
+    if (isPlainObject(data)) {
+      const keys = Object.keys(data);
+      if (keys.includes('Note') || keys.includes('Information')) return 'rate_limited';
+      const parsed = parseAlphaVantageData(data, ticker, from, to);
+      return parsed.length > 0 ? 'ok' : 'no_data';
+    }
+    return 'error';
+  } catch {
+    return 'error';
+  }
+}
+
+/**
  * Merge earnings arrays, preferring primary provider (Finnhub) values and
  * filling missing dates/fields from secondary provider (Alpha Vantage).
  */
