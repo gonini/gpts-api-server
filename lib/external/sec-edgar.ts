@@ -526,37 +526,40 @@ export async function fetchEPSData(
   from: string,
   to: string
 ): Promise<Array<{ date: string; eps: number }>> {
-  const cacheKey = `eps:${ticker}:${from}:${to}`;
+  const cacheKey = `eps:${ticker}:${from}:${to}:v2`;
   const cached = await CacheService.get(cacheKey);
   if (cached) return JSON.parse(cached);
+  // 후보 CIK 다중 수집 (티커 별칭 포함)
+  const ciks = await getCIKCandidatesForTicker(ticker);
+  if (!ciks.length) return [];
 
-  const localCik = getCIKForTicker(ticker);
-  const cik = localCik || await getCIKFromTicker(ticker);
-  if (!cik) return [];
-
-  const facts = await getCompanyFacts(cik);
   const keys = ['EarningsPerShareDiluted', 'EarningsPerShareBasic'];
   const rows: Array<{ date: string; eps: number }>= [];
   const fromDt = new Date(from);
   const toDt = new Date(to);
 
-  for (const key of keys) {
-    const node = facts?.facts?.['us-gaap']?.[key];
-    if (!node?.units) continue;
-    // USD/share 유닛만 고려
-    const unitKey = Object.keys(node.units).find((u) => u.toUpperCase().includes('USD/SHARE'))
-      || Object.keys(node.units).find((u) => u.toUpperCase().includes('USD'))
-      || Object.keys(node.units)[0];
-    const arr = node.units[unitKey] || [];
-    for (const it of arr) {
-      const end = toISODate(it.end);
-      if (!end) continue;
-      const dt = new Date(end);
-      if (dt >= fromDt && dt <= toDt && typeof it.val === 'number') {
-        rows.push({ date: end, eps: it.val });
+  for (const cik of ciks) {
+    try {
+      const facts = await getCompanyFacts(cik);
+      for (const key of keys) {
+        const node = facts?.facts?.['us-gaap']?.[key];
+        if (!node?.units) continue;
+        // USD/share 유닛 우선
+        const unitKey = Object.keys(node.units).find((u) => u.toUpperCase().includes('USD/SHARE'))
+          || Object.keys(node.units).find((u) => u.toUpperCase().includes('USD'))
+          || Object.keys(node.units)[0];
+        const arr = node.units[unitKey] || [];
+        for (const it of arr) {
+          const end = toISODate(it.end);
+          if (!end) continue;
+          const dt = new Date(end);
+          if (dt >= fromDt && dt <= toDt && typeof it.val === 'number') {
+            rows.push({ date: end, eps: it.val });
+          }
+        }
+        if (rows.length) break;
       }
-    }
-    if (rows.length) break; // 첫 유효 시리즈 사용
+    } catch {}
   }
 
   // 날짜 정렬 및 중복 제거(최근값 우선)
@@ -575,18 +578,20 @@ export async function fetchEPSFallbackFromRatio(
   to: string
 ): Promise<Array<{ date: string; eps: number }>> {
   try {
-    const cik = await getCIKFromTicker(ticker);
-    if (!cik) return [];
-    const facts = await getCompanyFacts(cik);
-    if (!facts) return [];
+    const ciks = await getCIKCandidatesForTicker(ticker);
+    if (!ciks.length) return [];
 
     const fromDt = new Date(from);
     const toDt = new Date(to);
 
-    const getNode = (key: string) => facts?.facts?.['us-gaap']?.[key];
-    const sharesNode = getNode('WeightedAverageNumberOfDilutedSharesOutstanding');
-    const niNode = getNode('NetIncomeLoss');
-    if (!sharesNode?.units || !niNode?.units) return [];
+    const out: Array<{ date: string; eps: number }> = [];
+    for (const cik of ciks) {
+      const facts = await getCompanyFacts(cik);
+      if (!facts) continue;
+      const getNode = (key: string) => facts?.facts?.['us-gaap']?.[key];
+      const sharesNode = getNode('WeightedAverageNumberOfDilutedSharesOutstanding');
+      const niNode = getNode('NetIncomeLoss');
+      if (!sharesNode?.units || !niNode?.units) continue;
 
     const flatten = (units: Record<string, any[]>, pickKeyHint: (k: string) => boolean) => {
       const keys = Object.keys(units).filter(pickKeyHint);
@@ -595,32 +600,32 @@ export async function fetchEPSFallbackFromRatio(
     };
 
     // shares: prefer 'shares' units; net income: prefer USD
-    const sharesArr = flatten(sharesNode.units, k => k.toLowerCase().includes('share'));
-    const niArr = flatten(niNode.units, k => k.toUpperCase().includes('USD'));
+      const sharesArr = flatten(sharesNode.units, k => k.toLowerCase().includes('share'));
+      const niArr = flatten(niNode.units, k => k.toUpperCase().includes('USD'));
 
     // Index net income by end date
-    const niByEnd = new Map<string, number>();
-    for (const it of niArr) {
-      const end = toISODate(it.end);
-      if (!end) continue;
-      const dt = new Date(end);
-      if (isNaN(dt.getTime()) || dt < fromDt || dt > toDt) continue;
-      if (typeof it.val === 'number') {
-        niByEnd.set(end, it.val);
+      const niByEnd = new Map<string, number>();
+      for (const it of niArr) {
+        const end = toISODate(it.end);
+        if (!end) continue;
+        const dt = new Date(end);
+        if (isNaN(dt.getTime()) || dt < fromDt || dt > toDt) continue;
+        if (typeof it.val === 'number') {
+          niByEnd.set(end, it.val);
+        }
       }
-    }
 
-    const out: Array<{ date: string; eps: number }> = [];
-    for (const it of sharesArr) {
-      const end = toISODate(it.end);
-      if (!end) continue;
-      const dt = new Date(end);
-      if (isNaN(dt.getTime()) || dt < fromDt || dt > toDt) continue;
-      const shares = typeof it.val === 'number' ? it.val : null;
-      const ni = end ? niByEnd.get(end) : undefined;
-      if (shares && shares !== 0 && typeof ni === 'number') {
-        const eps = ni / shares;
-        if (isFinite(eps)) out.push({ date: end, eps });
+      for (const it of sharesArr) {
+        const end = toISODate(it.end);
+        if (!end) continue;
+        const dt = new Date(end);
+        if (isNaN(dt.getTime()) || dt < fromDt || dt > toDt) continue;
+        const shares = typeof it.val === 'number' ? it.val : null;
+        const ni = end ? niByEnd.get(end) : undefined;
+        if (shares && shares !== 0 && typeof ni === 'number') {
+          const eps = ni / shares;
+          if (isFinite(eps)) out.push({ date: end, eps });
+        }
       }
     }
 
@@ -631,6 +636,32 @@ export async function fetchEPSFallbackFromRatio(
     console.warn(`[SEC] EPS fallback ratio failed for ${ticker}: ${e instanceof Error ? e.message : String(e)}`);
     return [];
   }
+}
+
+// ---- Helpers: collect candidate CIKs for a ticker (aliases + local map) ----
+async function getCIKCandidatesForTicker(ticker: string): Promise<string[]> {
+  const set = new Set<string>();
+  const upper = String(ticker || '').toUpperCase();
+  try {
+    const local = getCIKForTicker(upper);
+    if (local) set.add(local);
+  } catch {}
+  try {
+    const remote = await getCIKFromTicker(upper);
+    if (remote) set.add(remote);
+  } catch {}
+  try {
+    const aliases = await getTickerAliasesFromSEC(upper).catch(() => [upper]);
+    for (const al of aliases) {
+      const l = getCIKForTicker(al);
+      if (l) set.add(l);
+      try {
+        const r = await getCIKFromTicker(al);
+        if (r) set.add(r);
+      } catch {}
+    }
+  } catch {}
+  return Array.from(set);
 }
 
 // ---------- Ticker aliases (by CIK) ----------

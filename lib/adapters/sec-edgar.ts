@@ -17,10 +17,12 @@ export async function resolveEarningsEventDate(opts: {
     throw new Error('Invalid arguments for resolveEarningsEventDate');
   }
 
-  // 검색 윈도우: 분기말 ±30일 (후보군 확보)
+  // 검색 윈도우: 분기말 ±N일 (후보군 확보)
+  // 과거 연도에서 8-K/Ex99 근거가 누락되는 케이스를 줄이기 위해 기본 45일로 확대
   const DAY = 86400000;
-  const fromISO = toISODate(new Date(qe.getTime() - 30 * DAY))!;
-  const toISO = toISODate(new Date(qe.getTime() + 30 * DAY))!;
+  const spanDays = 45;
+  const fromISO = toISODate(new Date(qe.getTime() - spanDays * DAY))!;
+  const toISO = toISODate(new Date(qe.getTime() + spanDays * DAY))!;
 
   // 정규화된 보고서 조회(내부적으로 8-K index.json/press release 스캔 포함)
   const filings = await fetchAllSECReports(ticker, fromISO, toISO);
@@ -33,17 +35,33 @@ export async function resolveEarningsEventDate(opts: {
   // 2순위: 모든 8-K
   const k8All = filings.filter(f => f.form.startsWith('8-K'));
 
+  const preferEx99Event = process.env.USE_EX99_EVENT_DATE === '0' ? false : true;
+
   const pick = (cands: NormalizedSECFiling[]): NormalizedSECFiling | null => {
     if (!cands.length) return null;
-    // 분기말과 가장 가까운 event_date(없으면 filed_at) 선택
+    // 분기말과 가장 가까운 event_date(선호), 없으면 filed_at (USE_EX99_EVENT_DATE=1일 때 period_of_report는 마지막 우선)
     const qeTime = qe.getTime();
-    const best = [...cands]
-      .map(f => ({
-        f,
-        dISO: f.event_date || (f.period_of_report ?? null) || dateOnly(f.filed_at),
+    const scored = [...cands]
+      .map(f => {
+        const press = (f.exhibits || []).some((e) => e.type === 'press_release' && /(htm|html|txt)$/i.test(e.href));
+        const primaryISO = f.event_date || null;
+        const filedISO = dateOnly(f.filed_at);
+        const porISO = f.period_of_report || null;
+        // 후보 선택: event_date 우선, 그 다음 filed_at, 마지막으로 period_of_report (환경변수에 따라 POR는 가급적 배제)
+        const dISO = preferEx99Event
+          ? (primaryISO || filedISO || (null))
+          : (primaryISO || porISO || filedISO);
+        const dateISO = dISO || porISO || filedISO;
+        return { f, dateISO, press };
+      })
+      .filter(x => !!x.dateISO)
+      .map(x => ({
+        ...x,
+        dist: Math.abs(new Date(x.dateISO!).getTime() - qeTime),
+        bonus: (preferEx99Event && x.press && x.f.event_date) ? -1 : 0, // press+event_date 가점
       }))
-      .filter(x => !!x.dISO)
-      .sort((a, b) => Math.abs(new Date(a.dISO!).getTime() - qeTime) - Math.abs(new Date(b.dISO!).getTime() - qeTime))[0];
+      .sort((a, b) => (a.dist + a.bonus) - (b.dist + b.bonus));
+    const best = scored[0];
     return best ? best.f : null;
   };
 
@@ -56,18 +74,29 @@ export async function resolveEarningsEventDate(opts: {
 
   // 소스 판정: press_release 존재 여부 → 8-K_ex99, 그 외 filed_at/period_of_report
   const press = (chosen.exhibits || []).find((e) => e.type === 'press_release' && /(htm|html|txt)$/i.test(e.href));
-  const candidateISO = chosen.event_date || (chosen.period_of_report ?? null) || dateOnly(chosen.filed_at);
+  // 후보 일자: USE_EX99_EVENT_DATE=1이면 event_date→filed_at 우선, POR는 마지막
+  const candidateISO = (preferEx99Event
+    ? (chosen.event_date || dateOnly(chosen.filed_at) || (chosen.period_of_report ?? null))
+    : (chosen.event_date || (chosen.period_of_report ?? null) || dateOnly(chosen.filed_at))
+  );
 
   let source: EventDateSource = 'filed_at';
   if (press && chosen.event_date) source = '8-K_ex99';
   else if (chosen.period_of_report && candidateISO === chosen.period_of_report) source = 'period_of_report';
   else source = 'filed_at';
 
-  // BMO/AMC 판정: Exhibit 99 본문에 기반해 ET 기준 시간 문구를 탐지
+  // BMO/AMC 판정: Exhibit 99 본문 우선 → 없으면 8-K 본문(primary) 헤더/문구에서 추정
   let when: WhenFlag = 'unknown';
   if (press && press.href) {
     try {
       const res = await secFetchLight(press.href, { headers: { Accept: 'text/html,text/plain,*/*' } });
+      const text = (await res.text()).replace(/\s+/g, ' ').slice(0, 20000);
+      const flag = detectWhenFromTextET(text);
+      if (flag) when = flag;
+    } catch {}
+  } else if (chosen?.urls?.primary) {
+    try {
+      const res = await secFetchLight(chosen.urls.primary, { headers: { Accept: 'text/html,text/plain,*/*' } });
       const text = (await res.text()).replace(/\s+/g, ' ').slice(0, 20000);
       const flag = detectWhenFromTextET(text);
       if (flag) when = flag;
